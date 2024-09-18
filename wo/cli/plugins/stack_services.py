@@ -20,22 +20,20 @@ class WOStackStatusController(CementBaseController):
         services = []
         wo_system = "/lib/systemd/system/"
         pargs = self.app.pargs
-        if not (pargs.nginx or pargs.php or
-                pargs.php72 or
-                pargs.php73 or
-                pargs.php74 or
-                pargs.mysql or
-                pargs.redis or
-                pargs.fail2ban or
-                pargs.proftpd or
-                pargs.netdata or
-                pargs.ufw):
+        if all(value is None or value is False for value in vars(pargs).values()):
             pargs.nginx = True
             pargs.php = True
             pargs.mysql = True
             pargs.fail2ban = True
             pargs.netdata = True
             pargs.ufw = True
+
+        if pargs.php:
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
 
         if pargs.nginx:
             if os.path.exists('{0}'.format(wo_system) + 'nginx.service'):
@@ -44,42 +42,22 @@ class WOStackStatusController(CementBaseController):
                 Log.info(self, "Nginx is not installed")
 
         if pargs.php:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
-            else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+            for parg_version, version in WOVar.wo_php_versions.items():
+                if os.path.exists(f'{wo_system}' + f'php{version}-fpm.service'):
+                    services = services + [f'php{version}-fpm']
 
-        if pargs.php72:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
+        for parg_version, version in WOVar.wo_php_versions.items():
+            if (getattr(pargs, parg_version, False) and
+                    os.path.exists(f'{wo_system}' + f'php{version}-fpm.service')):
+                services = services + [f'php{version}-fpm']
             else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-
-        if pargs.php73:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-
-        if pargs.php74:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+                Log.info(self, f"PHP{version}-FPM is not installed")
 
         if pargs.mysql:
             if ((WOVar.wo_mysql_host == "localhost") or
                     (WOVar.wo_mysql_host == "127.0.0.1")):
-                if os.path.exists('/etc/systemd/system/mysql.service'):
-                    services = services + ['mysql']
+                if os.path.exists('/lib/systemd/system/mariadb.service'):
+                    services = services + ['mariadb']
                 else:
                     Log.info(self, "MySQL is not installed")
             else:
@@ -123,17 +101,17 @@ class WOStackStatusController(CementBaseController):
         services = []
         wo_system = "/lib/systemd/system/"
         pargs = self.app.pargs
-        if not (pargs.nginx or pargs.php or
-                pargs.php72 or pargs.php73 or
-                pargs.php74 or
-                pargs.mysql or
-                pargs.fail2ban or
-                pargs.netdata or
-                pargs.proftpd or
-                pargs.redis):
+        if all(value is None or value is False for value in vars(pargs).values()):
             pargs.nginx = True
             pargs.php = True
             pargs.mysql = True
+
+        if pargs.php:
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
 
         if pargs.nginx:
             if os.path.exists('{0}'.format(wo_system) + 'nginx.service'):
@@ -142,42 +120,22 @@ class WOStackStatusController(CementBaseController):
                 Log.info(self, "Nginx is not installed")
 
         if pargs.php:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
-            else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+            for parg_version, version in WOVar.wo_php_versions.items():
+                if os.path.exists(f'{wo_system}' + f'php{version}-fpm.service'):
+                    services = services + [f'php{version}-fpm']
 
-        if pargs.php72:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
+        for parg_version, version in WOVar.wo_php_versions.items():
+            if (getattr(pargs, parg_version, False) and
+                    os.path.exists(f'{wo_system}' + f'php{version}-fpm.service')):
+                services = services + [f'php{version}-fpm']
             else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-
-        if pargs.php73:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-
-        if pargs.php74:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+                Log.info(self, f"PHP{version}-FPM is not installed")
 
         if pargs.mysql:
             if ((WOVar.wo_mysql_host == "localhost") or
                     (WOVar.wo_mysql_host == "127.0.0.1")):
-                if os.path.exists('/etc/systemd/system/mysql.service'):
-                    services = services + ['mysql']
+                if os.path.exists('/lib/systemd/system/mariadb.service'):
+                    services = services + ['mariadb']
                 else:
                     Log.info(self, "MySQL is not installed")
             else:
@@ -221,18 +179,18 @@ class WOStackStatusController(CementBaseController):
         services = []
         wo_system = "/lib/systemd/system/"
         pargs = self.app.pargs
-        if not (pargs.nginx or pargs.php or
-                pargs.php72 or pargs.php73 or
-                pargs.php74 or
-                pargs.mysql or
-                pargs.netdata or
-                pargs.proftpd or
-                pargs.redis or
-                pargs.fail2ban):
+        if all(value is None or value is False for value in vars(pargs).values()):
             pargs.nginx = True
             pargs.php = True
             pargs.mysql = True
             pargs.netdata = True
+
+        if pargs.php:
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
 
         if pargs.nginx:
             if os.path.exists('{0}'.format(wo_system) + 'nginx.service'):
@@ -241,42 +199,22 @@ class WOStackStatusController(CementBaseController):
                 Log.info(self, "Nginx is not installed")
 
         if pargs.php:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
-            else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+            for parg_version, version in WOVar.wo_php_versions.items():
+                if os.path.exists(f'{wo_system}' + f'php{version}-fpm.service'):
+                    services = services + [f'php{version}-fpm']
 
-        if pargs.php72:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
+        for parg_version, version in WOVar.wo_php_versions.items():
+            if (getattr(pargs, parg_version, False) and
+                    os.path.exists(f'{wo_system}' + f'php{version}-fpm.service')):
+                services = services + [f'php{version}-fpm']
             else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-
-        if pargs.php73:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-
-        if pargs.php74:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+                Log.info(self, f"PHP{version}-FPM is not installed")
 
         if pargs.mysql:
             if ((WOVar.wo_mysql_host == "localhost") or
                     (WOVar.wo_mysql_host == "127.0.0.1")):
-                if os.path.exists('/etc/systemd/system/mysql.service'):
-                    services = services + ['mysql']
+                if os.path.exists('/lib/systemd/system/mariadb.service'):
+                    services = services + ['mariadb']
                 else:
                     Log.info(self, "MySQL is not installed")
             else:
@@ -320,15 +258,7 @@ class WOStackStatusController(CementBaseController):
         services = []
         wo_system = "/lib/systemd/system/"
         pargs = self.app.pargs
-        if not (pargs.nginx or pargs.php or
-                pargs.php72 or
-                pargs.php73 or
-                pargs.php74 or
-                pargs.mysql or
-                pargs.netdata or
-                pargs.proftpd or
-                pargs.redis or
-                pargs.fail2ban):
+        if all(value is None or value is False for value in vars(pargs).values()):
             pargs.nginx = True
             pargs.php = True
             pargs.mysql = True
@@ -343,42 +273,15 @@ class WOStackStatusController(CementBaseController):
                 Log.info(self, "Nginx is not installed")
 
         if pargs.php:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
-            else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
-
-        if pargs.php72:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
-            else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-
-        if pargs.php73:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-
-        if pargs.php74:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+            for parg_version, version in WOVar.wo_php_versions.items():
+                if os.path.exists(f'{wo_system}' + f'php{version}-fpm.service'):
+                    services = services + [f'php{version}-fpm']
 
         if pargs.mysql:
             if ((WOVar.wo_mysql_host == "localhost") or
                     (WOVar.wo_mysql_host == "127.0.0.1")):
-                if os.path.exists('/etc/systemd/system/mysql.service'):
-                    services = services + ['mysql']
+                if os.path.exists('/lib/systemd/system/mariadb.service'):
+                    services = services + ['mariadb']
                 else:
                     Log.info(self, "MySQL is not installed")
             else:
@@ -433,18 +336,18 @@ class WOStackStatusController(CementBaseController):
         services = []
         wo_system = "/lib/systemd/system/"
         pargs = self.app.pargs
-        if not (pargs.nginx or pargs.php or
-                pargs.php72 or pargs.php73 or
-                pargs.php74 or
-                pargs.mysql or
-                pargs.netdata or
-                pargs.proftpd or
-                pargs.redis or
-                pargs.fail2ban):
+        if all(value is None or value is False for value in vars(pargs).values()):
             pargs.nginx = True
             pargs.php = True
             pargs.mysql = True
             pargs.fail2ban = True
+
+        if pargs.php:
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
 
         if pargs.nginx:
             if os.path.exists('{0}'.format(wo_system) + 'nginx.service'):
@@ -453,41 +356,21 @@ class WOStackStatusController(CementBaseController):
                 Log.info(self, "Nginx is not installed")
 
         if pargs.php:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
-            else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+            for parg_version, version in WOVar.wo_php_versions.items():
+                if os.path.exists(f'{wo_system}' + f'php{version}-fpm.service'):
+                    services = services + [f'php{version}-fpm']
 
-        if pargs.php72:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.2-fpm.service'):
-                services = services + ['php7.2-fpm']
+        for parg_version, version in WOVar.wo_php_versions.items():
+            if (getattr(pargs, parg_version, False) and
+                    os.path.exists(f'{wo_system}' + f'php{version}-fpm.service')):
+                services = services + [f'php{version}-fpm']
             else:
-                Log.info(self, "PHP7.2-FPM is not installed")
-
-        if pargs.php73:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.3-fpm.service'):
-                services = services + ['php7.3-fpm']
-            else:
-                Log.info(self, "PHP7.3-FPM is not installed")
-
-        if pargs.php74:
-            if os.path.exists('{0}'.format(wo_system) + 'php7.4-fpm.service'):
-                services = services + ['php7.4-fpm']
-            else:
-                Log.info(self, "PHP7.4-FPM is not installed")
+                Log.info(self, f"PHP{version}-FPM is not installed")
 
         if pargs.mysql:
             if ((WOVar.wo_mysql_host == "localhost") or
                     (WOVar.wo_mysql_host == "127.0.0.1")):
-                if os.path.exists('/etc/systemd/system/mysql.service'):
+                if os.path.exists('/lib/systemd/system/mariadb.service'):
                     services = services + ['mysql']
                 else:
                     Log.info(self, "MySQL is not installed")

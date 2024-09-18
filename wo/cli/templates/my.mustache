@@ -1,4 +1,5 @@
 # MariaDB database server configuration file.
+# Optimized by WordOps {{release}}
 #
 # You can copy this file to one of:
 # - "/etc/mysql/my.cnf" to set global options,
@@ -41,11 +42,10 @@ tmpdir		= /tmp
 lc_messages_dir	= /usr/share/mysql
 lc_messages	= en_US
 skip-external-locking
-skip-name-resolve = 1
 #
 # Instead of skip-networking the default is now to listen only on
 # localhost which is more compatible and is not less secure.
-bind-address		= ::ffff:127.0.0.1
+bind-address		= localhost
 #
 # * Fine Tuning
 #
@@ -64,10 +64,10 @@ max_heap_table_size	= {{tmp_table_size}}M
 # This replaces the startup script and checks MyISAM tables if needed
 # the first time they are touched. On error, make copy and try a repair.
 myisam_recover_options = BACKUP
-key_buffer_size		= 128M
+key_buffer_size		= 16M
 open-files-limit	= 500000
 table_open_cache	= 16000
-myisam_sort_buffer_size	= 512M
+myisam_sort_buffer_size	= 128M
 concurrent_insert	= 2
 read_buffer_size	= 2M
 read_rnd_buffer_size	= 1M
@@ -143,7 +143,6 @@ innodb_file_per_table	= 1
 innodb_open_files	= 500000
 innodb_io_capacity	= 500000
 innodb_flush_method	= O_DIRECT
-innodb_buffer_pool_instances = {{innodb_instances}}
 #
 # * Security Features
 #
@@ -191,5 +190,6 @@ key_buffer		= 16M
 # * IMPORTANT: Additional settings that can override those from this file!
 #   The files must end with '.cnf', otherwise they'll be ignored.
 #
+{{#newmariadb}}
 !include /etc/mysql/mariadb.cnf
-!includedir /etc/mysql/conf.d/
+!includedir /etc/mysql/conf.d/{{/newmariadb}}

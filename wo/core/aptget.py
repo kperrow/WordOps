@@ -46,7 +46,8 @@ class WOAptGet():
                         if "NO_PUBKEY" in single_error:
                             key = single_error.rsplit(None, 1)[-1]
                             WORepo.add_key(
-                                self, key, keyserver="hkp://pgp.mit.edu")
+                                self, key,
+                                keyserver="hkp://keyserver.ubuntu.com")
 
                     proc = subprocess.Popen(
                         'DEBIAN_FRONTEND=noninteractive apt-get update -qq',
@@ -99,7 +100,8 @@ class WOAptGet():
                     "--option=Dpkg::options::=--force-confdef "
                     "--option=Dpkg::options::=--force-unsafe-io "
                     "--option=Dpkg::options::=--force-confold "
-                    "--assume-yes --quiet dist-upgrade",
+                    "--assume-yes --quiet --allow-downgrades "
+                    "dist-upgrade",
                     shell=True, stdin=None,
                     stdout=f, stderr=f,
                     executable="/bin/bash")

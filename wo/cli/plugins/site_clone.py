@@ -7,7 +7,7 @@ from wo.cli.plugins.site_functions import (
     doCleanupAction, setupdatabase, setupwordpress, setwebrootpermissions,
     display_cache_settings, copyWildcardCert)
 from wo.cli.plugins.sitedb import (addNewSite, deleteSiteInfo,
-                                   updateSiteInfo, getSiteInfo)
+                                   updateSiteInfo)
 from wo.core.acme import WOAcme
 from wo.core.domainvalidate import WODomain
 from wo.core.git import WOGit
@@ -18,21 +18,29 @@ from wo.core.sslutils import SSL
 from wo.core.variables import WOVar
 
 
-class WOSiteCreateController(CementBaseController):
+class WOSiteCloneController(CementBaseController):
     class Meta:
-        label = 'create'
+        label = 'clone'
         stacked_on = 'site'
         stacked_type = 'nested'
-        description = ('this commands set up configuration and installs '
-                       'required files as options are provided')
+        description = ('this commands allow you to clone a site')
         arguments = [
             (['site_name'],
+                dict(help='domain name for the site to be cloned.',
+                     nargs='?')),
+            (['newsite_name'],
                 dict(help='domain name for the site to be created.',
                      nargs='?')),
             (['--html'],
                 dict(help="create html site", action='store_true')),
             (['--php'],
-             dict(help="create php site", action='store_true')),
+             dict(help="create php 7.2 site", action='store_true')),
+            (['--php72'],
+                dict(help="create php 7.2 site", action='store_true')),
+            (['--php73'],
+                dict(help="create php 7.3 site", action='store_true')),
+            (['--php74'],
+                dict(help="create php 7.4 site", action='store_true')),
             (['--mysql'],
                 dict(help="create mysql site", action='store_true')),
             (['--wp'],
@@ -61,12 +69,6 @@ class WOSiteCreateController(CementBaseController):
                 dict(help="create WordPress single/multi site "
                      "with redis cache",
                      action='store_true')),
-            (['--alias'],
-                dict(help="domain name to redirect to",
-                     action='store', nargs='?')),
-            (['--subsiteof'],
-                dict(help="create a subsite of a multisite install",
-                     action='store', nargs='?')),
             (['-le', '--letsencrypt'],
                 dict(help="configure letsencrypt ssl for the site",
                      action='store' or 'store_const',
@@ -101,10 +103,6 @@ class WOSiteCreateController(CementBaseController):
                                    "without installing WordPress",
                                    action='store_true')),
         ]
-        for php_version, php_number in WOVar.wo_php_versions.items():
-            arguments.append(([f'--{php_version}'],
-                              dict(help=f'Create PHP {php_number} site',
-                                   action='store_true')))
 
     @expose(hide=True)
     def default(self):
@@ -127,24 +125,10 @@ class WOSiteCreateController(CementBaseController):
             proxyinfo = proxyinfo.split(':')
             host = proxyinfo[0].strip()
             port = '80' if len(proxyinfo) < 2 else proxyinfo[1].strip()
-        elif stype is None and not pargs.proxy and not pargs.alias and not pargs.subsiteof:
+        elif stype is None and not pargs.proxy:
             stype, cache = 'html', 'basic'
-        elif stype is None and pargs.alias:
-            stype, cache = 'alias', ''
-            alias_name = pargs.alias.strip()
-            if not alias_name:
-                Log.error(self, "Please provide alias name")
-        elif stype is None and pargs.subsiteof:
-            stype, cache = 'subsite', ''
-            subsiteof_name = pargs.subsiteof.strip()
-            if not subsiteof_name:
-                Log.error(self, "Please provide multisite parent name")
         elif stype and pargs.proxy:
             Log.error(self, "proxy should not be used with other site types")
-        elif stype and pargs.alias:
-            Log.error(self, "alias should not be used with other site types")
-        elif stype and pargs.subsiteof:
-            Log.error(self, "subsiteof should not be used with other site types")
 
         if not pargs.site_name:
             try:
@@ -185,47 +169,7 @@ class WOSiteCreateController(CementBaseController):
             data['port'] = port
             data['basic'] = True
 
-        if stype == 'alias':
-            data = dict(
-                site_name=wo_domain, www_domain=wo_www_domain,
-                static=True, basic=False, wp=False,
-                wpfc=False, wpsc=False, wprocket=False, wpce=False,
-                multisite=False, wpsubdir=False, webroot=wo_site_webroot)
-            data['alias'] = True
-            data['alias_name'] = alias_name
-            data['basic'] = True
-
-        if stype == 'subsite':
-            # Get parent site data
-            parent_site_info = getSiteInfo(self, subsiteof_name)
-            if not parent_site_info:
-                Log.error(self, "Parent site {0} does not exist"
-                          .format(subsiteof_name))
-            if not parent_site_info.is_enabled:
-                Log.error(self, "Parent site {0} is not enabled"
-                          .format(subsiteof_name))
-            if parent_site_info.site_type not in ['wpsubdomain', 'wpsubdir']:
-                Log.error(self, "Parent site {0} is not WordPress multisite"
-                          .format(subsiteof_name))
-
-            data = dict(
-                site_name=wo_domain, www_domain=wo_www_domain,
-                static=False, basic=False, multisite=False, webroot=wo_site_webroot)
-
-            data["wp"] = parent_site_info.site_type == 'wp'
-            data["wpfc"] = parent_site_info.cache_type == 'wpfc'
-            data["wpsc"] = parent_site_info.cache_type == 'wpsc'
-            data["wprocket"] = parent_site_info.cache_type == 'wprocket'
-            data["wpce"] = parent_site_info.cache_type == 'wpce'
-            data["wpredis"] = parent_site_info.cache_type == 'wpredis'
-            data["wpsubdir"] = parent_site_info.site_type == 'wpsubdir'
-            data["wo_php"] = ("php" + parent_site_info.php_version).replace(".", "")
-            data['subsite'] = True
-            data['subsiteof_name'] = subsiteof_name
-            data['subsiteof_webroot'] = parent_site_info.site_path
-
-        if (pargs.php74 or pargs.php80 or pargs.php81 or
-                pargs.php82 or pargs.php83):
+        if pargs.php72 or pargs.php73 or pargs.php74:
             data = dict(
                 site_name=wo_domain, www_domain=wo_www_domain,
                 static=False, basic=False,
@@ -269,33 +213,40 @@ class WOSiteCreateController(CementBaseController):
         else:
             pass
 
-        # Initialize all PHP versions to False
-        for version in WOVar.wo_php_versions:
-            data[version] = False
+        data['php73'] = False
+        data['php74'] = False
+        data['php72'] = False
 
-        # Check for PHP versions in pargs
-        for pargs_version, version in WOVar.wo_php_versions.items():
-            if data and getattr(pargs, pargs_version, False):
-                data[pargs_version] = True
-                data['wo_php'] = pargs_version
-                php_version = version
-                break
+        if data and pargs.php73:
+            data['php73'] = True
+            data['wo_php'] = 'php73'
+        elif data and pargs.php74:
+            data['php74'] = True
+            data['wo_php'] = 'php74'
+        elif data and pargs.php72:
+            data['php72'] = True
+            data['wo_php'] = 'php72'
         else:
             if self.app.config.has_section('php'):
-                config_php_ver = self.app.config.get('php', 'version')
-
-                for wo_key, php_ver in WOVar.wo_php_versions.items():
-                    if php_ver == config_php_ver:
-                        data[wo_key] = True
-                        data['wo_php'] = wo_key
-                        php_version = php_ver
-                        break
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                if config_php_ver == '7.2':
+                    data['php72'] = True
+                    data['wo_php'] = 'php72'
+                elif config_php_ver == '7.3':
+                    data['php73'] = True
+                    data['wo_php'] = 'php73'
+                elif config_php_ver == '7.4':
+                    data['php74'] = True
+                    data['wo_php'] = 'php74'
+            else:
+                data['php73'] = True
+                data['wo_php'] = 'php73'
 
         if ((not pargs.wpfc) and (not pargs.wpsc) and
             (not pargs.wprocket) and
             (not pargs.wpce) and
-            (not pargs.wpredis) and
-                (not pargs.subsiteof)):
+                (not pargs.wpredis)):
             data['basic'] = True
 
         if (cache == 'wpredis'):
@@ -351,50 +302,17 @@ class WOSiteCreateController(CementBaseController):
                         Log.info(self, Log.ENDC + msg, log=False)
                 Log.info(self, "Successfully created site"
                          " http://{0}".format(wo_domain))
+                return
 
-            elif 'alias' in data.keys() and data['alias']:
-                addNewSite(self, wo_domain, stype, cache, wo_site_webroot)
-                # Service Nginx Reload
-                if not WOService.reload_service(self, 'nginx'):
-                    Log.info(self, Log.FAIL +
-                             "There was a serious error encountered...")
-                    Log.info(self, Log.FAIL + "Cleaning up afterwards...")
-                    doCleanupAction(self, domain=wo_domain)
-                    deleteSiteInfo(self, wo_domain)
-                    Log.error(self, "service nginx reload failed. "
-                              "check issues with `nginx -t` command")
-                    Log.error(self, "Check the log for details: "
-                              "`tail /var/log/wo/wordops.log` "
-                              "and please try again")
-                if wo_auth and len(wo_auth):
-                    for msg in wo_auth:
-                        Log.info(self, Log.ENDC + msg, log=False)
-                Log.info(self, "Successfully created site"
-                         " http://{0}".format(wo_domain))
-
-            elif 'subsite' in data.keys() and data['subsite']:
-                addNewSite(self, wo_domain, stype, cache, wo_site_webroot)
-                # Service Nginx Reload
-                if not WOService.reload_service(self, 'nginx'):
-                    Log.info(self, Log.FAIL +
-                             "There was a serious error encountered...")
-                    Log.info(self, Log.FAIL + "Cleaning up afterwards...")
-                    doCleanupAction(self, domain=wo_domain)
-                    deleteSiteInfo(self, wo_domain)
-                    Log.error(self, "service nginx reload failed. "
-                              "check issues with `nginx -t` command")
-                    Log.error(self, "Check the log for details: "
-                              "`tail /var/log/wo/wordops.log` "
-                              "and please try again")
-                if wo_auth and len(wo_auth):
-                    for msg in wo_auth:
-                        Log.info(self, Log.ENDC + msg, log=False)
-                Log.info(self, "Successfully created site"
-                         " http://{0}".format(wo_domain))
-
+            if data['php72']:
+                php_version = "7.2"
+            elif data['php74']:
+                php_version = "7.4"
             else:
-                addNewSite(self, wo_domain, stype, cache, wo_site_webroot,
-                           php_version=php_version)
+                php_version = "7.3"
+
+            addNewSite(self, wo_domain, stype, cache, wo_site_webroot,
+                       php_version=php_version)
 
             # Setup database for MySQL site
             if 'wo_db_name' in data.keys() and not data['wp']:

@@ -219,7 +219,11 @@ def setupdatabase(self, data):
     Log.debug(self, "Setting up user privileges")
     try:
         WOMysql.execute(self,
-                        "grant all privileges on `{0}`.* to `{1}`@`{2}`"
+                        "grant select, insert, update, delete, create, drop, "
+                        "references, index, alter, create temporary tables, "
+                        "lock tables, execute, create view, show view, "
+                        "create routine, alter routine, event, "
+                        "trigger on `{0}`.* to `{1}`@`{2}`"
                         .format(wo_db_name,
                                 wo_db_username, wo_mysql_grant_host))
     except StatementExcecutionError:
@@ -233,7 +237,7 @@ def setupdatabase(self, data):
     data['wo_db_pass'] = wo_db_password
     data['wo_db_host'] = WOVar.wo_mysql_host
     data['wo_mysql_grant_host'] = wo_mysql_grant_host
-    return(data)
+    return (data)
 
 
 def setupwordpress(self, data, vhostonly=False):
@@ -322,11 +326,8 @@ def setupwordpress(self, data, vhostonly=False):
                                             data['wo_db_user'],
                                             data['wo_db_host']
                                             ) +
-                                    "--dbpass=\'{0}\' "
-                                    "--extra-php<<PHP \n"
-                                    "\n{1}\nPHP\""
-                                    .format(data['wo_db_pass'],
-                                            "\ndefine(\'WP_DEBUG\', false);"),
+                                    "--dbpass=\'{0}\'\""
+                                    .format(data['wo_db_pass']),
                                     log=False
                                     ):
                 pass
@@ -343,13 +344,12 @@ def setupwordpress(self, data, vhostonly=False):
                   .format(data['wo_db_name'],
                           wo_wp_prefix, data['wo_db_host']) +
                   "--dbuser=\'{0}\' --dbpass= "
-                  "--extra-php<<PHP \n {1} {2} {3} \nPHP\""
+                  "--extra-php<<PHP \n {1} {2} \nPHP\""
                   .format(data['wo_db_user'],
                           "\ndefine(\'WPMU_ACCEL_REDIRECT\',"
                           " true);",
                           "\ndefine(\'CONCATENATE_SCRIPTS\',"
-                          " false);",
-                          "\n\ndefine(\'WP_DEBUG\', false);"))
+                          " false);"))
         try:
             if WOShellExec.cmd_exec(self, "/bin/bash -c \"{0} --allow-root"
                                     .format(WOVar.wo_wpcli_path) +
@@ -360,12 +360,11 @@ def setupwordpress(self, data, vhostonly=False):
                                             data['wo_db_host']) +
                                     "--dbuser=\'{0}\' --dbpass=\'{1}\' "
                                     "--extra-php<<PHP \n "
-                                    "\n{2} {3}\nPHP\""
+                                    "\n{2} \nPHP\""
                                     .format(data['wo_db_user'],
                                             data['wo_db_pass'],
                                             "\ndefine(\'WPMU_ACCEL_REDIRECT\',"
-                                            " true);",
-                                            "\ndefine(\'WP_DEBUG\', false);"),
+                                            " true);"),
                                     log=False
                                     ):
                 pass
@@ -376,14 +375,15 @@ def setupwordpress(self, data, vhostonly=False):
 
     # set all wp-config.php variables
     wp_conf_variables = [
-        ['WP_CACHE_KEY_SALT', '{0}:'.format(wo_domain_name)],
-        ['WP_MEMORY_LIMIT', '128M'],
-        ['WP_MAX_MEMORY_LIMIT', '256M'],
+        ['WP_REDIS_PREFIX', '{0}:'.format(wo_domain_name)],
+        ['WP_MEMORY_LIMIT', '256M'],
+        ['WP_MAX_MEMORY_LIMIT', '512M'],
         ['CONCATENATE_SCRIPTS', 'false'],
         ['WP_POST_REVISIONS', '10'],
         ['MEDIA_TRASH', 'true'],
         ['EMPTY_TRASH_DAYS', '15'],
-        ['WP_AUTO_UPDATE_CORE', 'minor']]
+        ['WP_AUTO_UPDATE_CORE', 'minor'],
+        ['WP_REDIS_DISABLE_BANNERS', 'true']]
     Log.wait(self, "Configuring WordPress")
     for wp_conf in wp_conf_variables:
         wp_var = wp_conf[0]
@@ -592,16 +592,16 @@ def setupwordpress(self, data, vhostonly=False):
     """Install Cache-Enabler"""
     if data['wpce']:
         installwp_plugin(self, 'cache-enabler', data)
-        plugin_data_object = {"expires": 24,
-                              "new_post": 1,
-                              "new_comment": 0,
-                              "webp": 0,
+        plugin_data_object = {"cache_expires": 24,
+                              "clear_site_cache_on_saved_post": 1,
+                              "clear_site_cache_on_saved_comment": 0,
+                              "convert_image_urls_to_webp": 0,
                               "clear_on_upgrade": 1,
-                              "compress": 0,
-                              "excl_ids": "",
-                              "excl_regexp": "",
-                              "excl_cookies": "",
-                              "incl_attributes": "",
+                              "compress_cache": 1,
+                              "excluded_post_ids": "",
+                              "excluded_query_strings": "",
+                              "excluded_cookies": "",
+                              "minify_inline_css_js": 1,
                               "minify_html": 1}
         plugin_data = json.dumps(plugin_data_object)
         setupwp_plugin(self, 'cache-enabler', 'cache-enabler',
@@ -628,7 +628,7 @@ def setupwordpress(self, data, vhostonly=False):
     wp_creds = dict(wp_user=wo_wp_user, wp_pass=wo_wp_pass,
                     wp_email=wo_wp_email)
 
-    return(wp_creds)
+    return (wp_creds)
 
 
 def setupwordpressnetwork(self, data):
@@ -757,7 +757,7 @@ def setupwp_plugin(self, plugin_name, plugin_option, plugin_data, data):
 def setwebrootpermissions(self, webroot):
     Log.debug(self, "Setting up permissions")
     try:
-        WOFileUtils.findBrokenSymlink(self, '/var/www/')
+        WOFileUtils.findBrokenSymlink(self, f'{webroot}')
         WOFileUtils.chown(self, webroot, WOVar.wo_php_user,
                           WOVar.wo_php_user, recursive=True)
     except Exception as e:
@@ -775,7 +775,8 @@ def sitebackup(self, data):
                          .format(data['site_name']), backup_path)
 
     if data['currsitetype'] in ['html', 'php', 'php72', 'php74',
-                                'php73', 'proxy', 'mysql']:
+                                'php73', 'php80', 'php81', 'php82', 'php83'
+                                'proxy', 'mysql']:
         if not data['wp']:
             Log.info(self, "Backing up Webroot \t\t", end='')
             WOFileUtils.copyfiles(self, wo_site_webroot +
@@ -805,11 +806,11 @@ def sitebackup(self, data):
     if data['wo_db_name']:
         Log.info(self, 'Backing up database \t\t', end='')
         try:
-            if not WOShellExec.cmd_exec(self, "mysqldump --single-transaction "
-                                        "{0} | pigz -9 -p\"$(nproc)\" "
-                                        "> {1}/{0}.gz"
-                                        .format(data['wo_db_name'],
-                                                backup_path)):
+            if not WOShellExec.cmd_exec(
+                self, "mysqldump --single-transaction --hex-blob "
+                "{0} | zstd -c > {1}/{0}.zst"
+                .format(data['wo_db_name'],
+                        backup_path)):
                 Log.info(self,
                          "[" + Log.ENDC + Log.FAIL + "Fail" + Log.OKBLUE + "]")
                 raise SiteError("mysqldump failed to backup database")
@@ -834,8 +835,8 @@ def site_package_check(self, stype):
     stack = WOStackController()
     stack.app = self.app
     pargs = self.app.pargs
-    if stype in ['html', 'proxy', 'php', 'php72', 'mysql', 'wp', 'wpsubdir',
-                 'wpsubdomain', 'php73', 'php74']:
+    if stype in ['html', 'proxy', 'php', 'mysql', 'wp', 'wpsubdir',
+                 'wpsubdomain', 'php74', 'php80', 'php81', 'php82', 'php83', 'alias', 'subsite']:
         Log.debug(self, "Setting apt_packages variable for Nginx")
 
         # Check if server has nginx-custom package
@@ -871,61 +872,45 @@ def site_package_check(self, stype):
                     wo_nginx.write('fastcgi_param \tSCRIPT_FILENAME '
                                    '\t$request_filename;\n')
 
-    if pargs.php and pargs.php73:
-        Log.error(
-            self, "Error: two different PHP versions cannot be "
-                  "combined within the same WordOps site")
+        php_versions = ['php74', 'php80', 'php81', 'php82', 'php83']
 
-    if pargs.php and pargs.php74:
-        Log.error(
-            self, "Error: two different PHP versions cannot be "
-                  "combined within the same WordOps site")
+        selected_versions = [version for version in php_versions if getattr(pargs, version)]
+        if len(selected_versions) > 1:
+            Log.error(self, "Error: two different PHP versions cannot be "
+                      "combined within the same WordOps site")
 
-    if pargs.php73 and pargs.php74:
-        Log.error(
-            self, "Error: two different PHP versions cannot be "
-                  "combined within the same WordOps site")
-
-    if ((not pargs.php73) and (not pargs.php74) and
-        stype in ['php', 'php72', 'mysql', 'wp', 'wpsubdir',
+    if ((not pargs.php74) and (not pargs.php80) and
+        (not pargs.php81) and (not pargs.php82) and
+        (not pargs.php83) and
+        stype in ['php', 'mysql', 'wp', 'wpsubdir',
                   'wpsubdomain']):
-        Log.debug(self, "Setting apt_packages variable for PHP 7.2")
-        if not (WOAptGet.is_installed(self, 'php7.2-fpm')):
-            apt_packages = apt_packages + WOVar.wo_php72
-            if not (WOAptGet.is_installed(self, 'php7.3-fpm') or
-                    WOAptGet.is_installed(self, 'php7.4-fpm')):
-                apt_packages = apt_packages + WOVar.wo_php_extra
+        Log.debug(self, "Setting apt_packages variable for PHP")
 
-    if pargs.php73 and stype in ['php73', 'mysql', 'wp',
-                                          'wpsubdir', 'wpsubdomain']:
-        Log.debug(self, "Setting apt_packages variable for PHP 7.3")
-        if not WOAptGet.is_installed(self, 'php7.3-fpm'):
-            apt_packages = apt_packages + WOVar.wo_php73
-            if not (WOAptGet.is_installed(self, 'php7.2-fpm') or
-                    WOAptGet.is_installed(self, 'php7.4-fpm')):
-                apt_packages = apt_packages + WOVar.wo_php_extra
+        for version_key, version_number in WOVar.wo_php_versions.items():
+            if (self.app.config.has_section('php') and
+                    self.app.config.get('php', 'version') == version_number):
+                Log.debug(
+                    self,
+                    f"Setting apt_packages variable for PHP {version_number}")
+                if not WOAptGet.is_installed(self, f'php{version_number}-fpm'):
+                    apt_packages += getattr(
+                        WOVar, f'wo_{version_key}') + WOVar.wo_php_extra
 
-    if pargs.php74 and stype in ['php74', 'mysql', 'wp',
-                                 'wpsubdir', 'wpsubdomain']:
-        Log.debug(self, "Setting apt_packages variable for PHP 7.4")
-        if not WOAptGet.is_installed(self, 'php7.4-fpm'):
-            apt_packages = apt_packages + WOVar.wo_php74
-            if not (WOAptGet.is_installed(self, 'php7.3-fpm') or
-                    WOAptGet.is_installed(self, 'php7.2-fpm')):
-                apt_packages = apt_packages + WOVar.wo_php_extra
+    for version_key, version_number in WOVar.wo_php_versions.items():
+        if getattr(pargs, version_key) and stype in [version_key, 'mysql', 'wp', 'wpsubdir', 'wpsubdomain']:
+            Log.debug(self, f"Setting apt_packages variable for PHP {version_number}")
+            if not WOAptGet.is_installed(self, f'php{version_number}-fpm'):
+                apt_packages += getattr(WOVar, f'wo_{version_key}') + WOVar.wo_php_extra
 
     if stype in ['mysql', 'wp', 'wpsubdir', 'wpsubdomain']:
         Log.debug(self, "Setting apt_packages variable for MySQL")
-        if not WOShellExec.cmd_exec(self, "/usr/bin/mysqladmin ping"):
+        if not WOMysql.mariadb_ping(self):
             apt_packages = apt_packages + WOVar.wo_mysql
 
     if stype in ['wp', 'wpsubdir', 'wpsubdomain']:
         Log.debug(self, "Setting packages variable for WP-CLI")
         if not WOAptGet.is_exec(self, "wp"):
-            packages = packages + [["https://github.com/wp-cli/wp-cli/"
-                                    "releases/download/v{0}/"
-                                    "wp-cli-{0}.phar"
-                                    .format(WOVar.wo_wp_cli),
+            packages = packages + [[f"{WOVar.wpcli_url}",
                                     "/usr/local/bin/wp", "WP-CLI"]]
     if pargs.wpredis:
         Log.debug(self, "Setting apt_packages variable for redis")
@@ -942,8 +927,8 @@ def site_package_check(self, stype):
                   "/usr/local/sbin/install-ngxblocker",
                   "ngxblocker"]]
 
-    return(stack.install(apt_packages=apt_packages, packages=packages,
-                         disp_msg=False))
+    return (stack.install(apt_packages=apt_packages, packages=packages,
+                          disp_msg=False))
 
 
 def updatewpuserpassword(self, wo_domain, wo_site_webroot):
@@ -1094,8 +1079,8 @@ def detSitePar(opts):
     cachelist = list()
     for key, val in opts.items():
         if val and key in ['html', 'php', 'mysql', 'wp',
-                           'wpsubdir', 'wpsubdomain', 'php72',
-                           'php73', 'php74']:
+                           'wpsubdir', 'wpsubdomain',
+                           'php74', 'php80', 'php81', 'php82', 'php83']:
             typelist.append(key)
         elif val and key in ['wpfc', 'wpsc', 'wpredis', 'wprocket', 'wpce']:
             cachelist.append(key)
@@ -1111,19 +1096,31 @@ def detSitePar(opts):
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('php72', 'mysql', 'html') for x in typelist]:
-            sitetype = 'mysql'
-            if not cachelist:
-                cachetype = 'basic'
-            else:
-                cachetype = cachelist[0]
-        elif False not in [x in ('php73', 'mysql', 'html') for x in typelist]:
-            sitetype = 'mysql'
-            if not cachelist:
-                cachetype = 'basic'
-            else:
-                cachetype = cachelist[0]
         elif False not in [x in ('php74', 'mysql', 'html') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php80', 'mysql', 'html') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php81', 'mysql', 'html') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php82', 'mysql', 'html') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php83', 'mysql', 'html') for x in typelist]:
             sitetype = 'mysql'
             if not cachelist:
                 cachetype = 'basic'
@@ -1135,19 +1132,31 @@ def detSitePar(opts):
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('php72', 'mysql') for x in typelist]:
-            sitetype = 'mysql'
-            if not cachelist:
-                cachetype = 'basic'
-            else:
-                cachetype = cachelist[0]
-        elif False not in [x in ('php73', 'mysql') for x in typelist]:
-            sitetype = 'mysql'
-            if not cachelist:
-                cachetype = 'basic'
-            else:
-                cachetype = cachelist[0]
         elif False not in [x in ('php74', 'mysql') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php80', 'mysql') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php81', 'mysql') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php82', 'mysql') for x in typelist]:
+            sitetype = 'mysql'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('php83', 'mysql') for x in typelist]:
             sitetype = 'mysql'
             if not cachelist:
                 cachetype = 'basic'
@@ -1177,32 +1186,32 @@ def detSitePar(opts):
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('wp', 'php72') for x in typelist]:
-            sitetype = 'wp'
-            if not cachelist:
-                cachetype = 'basic'
-            else:
-                cachetype = cachelist[0]
-        elif False not in [x in ('wp', 'php73') for x in typelist]:
-            sitetype = 'wp'
-            if not cachelist:
-                cachetype = 'basic'
-            else:
-                cachetype = cachelist[0]
         elif False not in [x in ('wp', 'php74') for x in typelist]:
             sitetype = 'wp'
             if not cachelist:
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('wpsubdir', 'php72') for x in typelist]:
-            sitetype = 'wpsubdir'
+        elif False not in [x in ('wp', 'php80') for x in typelist]:
+            sitetype = 'wp'
             if not cachelist:
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('wpsubdir', 'php73') for x in typelist]:
-            sitetype = 'wpsubdir'
+        elif False not in [x in ('wp', 'php81') for x in typelist]:
+            sitetype = 'wp'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wp', 'php82') for x in typelist]:
+            sitetype = 'wp'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wp', 'php83') for x in typelist]:
+            sitetype = 'wp'
             if not cachelist:
                 cachetype = 'basic'
             else:
@@ -1213,19 +1222,55 @@ def detSitePar(opts):
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('wpsubdomain', 'php72') for x in typelist]:
-            sitetype = 'wpsubdomain'
+        elif False not in [x in ('wpsubdir', 'php80') for x in typelist]:
+            sitetype = 'wpsubdir'
             if not cachelist:
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
-        elif False not in [x in ('wpsubdomain', 'php73') for x in typelist]:
-            sitetype = 'wpsubdomain'
+        elif False not in [x in ('wpsubdir', 'php81') for x in typelist]:
+            sitetype = 'wpsubdir'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wpsubdir', 'php82') for x in typelist]:
+            sitetype = 'wpsubdir'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wpsubdir', 'php83') for x in typelist]:
+            sitetype = 'wpsubdir'
             if not cachelist:
                 cachetype = 'basic'
             else:
                 cachetype = cachelist[0]
         elif False not in [x in ('wpsubdomain', 'php74') for x in typelist]:
+            sitetype = 'wpsubdomain'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wpsubdomain', 'php80') for x in typelist]:
+            sitetype = 'wpsubdomain'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wpsubdomain', 'php81') for x in typelist]:
+            sitetype = 'wpsubdomain'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wpsubdomain', 'php82') for x in typelist]:
+            sitetype = 'wpsubdomain'
+            if not cachelist:
+                cachetype = 'basic'
+            else:
+                cachetype = cachelist[0]
+        elif False not in [x in ('wpsubdomain', 'php83') for x in typelist]:
             sitetype = 'wpsubdomain'
             if not cachelist:
                 cachetype = 'basic'
@@ -1237,13 +1282,19 @@ def detSitePar(opts):
         if not typelist and not cachelist:
             sitetype = None
             cachetype = None
-        elif (not typelist or "php72" in typelist) and cachelist:
-            sitetype = 'wp'
-            cachetype = cachelist[0]
-        elif (not typelist or "php73" in typelist) and cachelist:
-            sitetype = 'wp'
-            cachetype = cachelist[0]
         elif (not typelist or "php74" in typelist) and cachelist:
+            sitetype = 'wp'
+            cachetype = cachelist[0]
+        elif (not typelist or "php80" in typelist) and cachelist:
+            sitetype = 'wp'
+            cachetype = cachelist[0]
+        elif (not typelist or "php81" in typelist) and cachelist:
+            sitetype = 'wp'
+            cachetype = cachelist[0]
+        elif (not typelist or "php82" in typelist) and cachelist:
+            sitetype = 'wp'
+            cachetype = cachelist[0]
+        elif (not typelist or "php83" in typelist) and cachelist:
             sitetype = 'wp'
             cachetype = cachelist[0]
         elif typelist and (not cachelist):

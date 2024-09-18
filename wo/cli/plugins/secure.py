@@ -23,7 +23,7 @@ class WOSecureController(CementBaseController):
         stacked_on = 'base'
         stacked_type = 'nested'
         description = (
-            'Secure command provide the ability to'
+            'Secure command provide the ability to '
             'adjust settings for backend and to harden server security.')
         arguments = [
             (['--auth'],
@@ -83,11 +83,11 @@ class WOSecureController(CementBaseController):
             if password == "":
                 pargs.user_pass = passwd
         Log.debug(self, "printf username:"
-                  "$(openssl passwd -crypt "
+                  "$(openssl passwd --apr1 "
                   "password 2> /dev/null)\n\""
                   "> /etc/nginx/htpasswd-wo 2>/dev/null")
         WOShellExec.cmd_exec(self, "printf \"{username}:"
-                             "$(openssl passwd -crypt "
+                             "$(openssl passwd -apr1 "
                              "{password} 2> /dev/null)\n\""
                              "> /etc/nginx/htpasswd-wo 2>/dev/null"
                              .format(username=pargs.user_input,
@@ -117,10 +117,11 @@ class WOSecureController(CementBaseController):
                 Log.info(self, "Please Enter valid port number :")
                 port = input("WordOps admin port [22222]:")
             pargs.user_input = port
-        WOShellExec.cmd_exec(self, "sed -i \"s/listen.*/listen "
-                             "{port} default_server ssl http2;/\" "
-                             "/etc/nginx/sites-available/22222"
-                             .format(port=pargs.user_input))
+        data = dict(release=WOVar.wo_version,
+                    port=pargs.user_input, webroot='/var/www/')
+        WOTemplate.deploy(
+            self, '/etc/nginx/sites-available/22222',
+            '22222.mustache', data)
         WOGit.add(self, ["/etc/nginx"],
                   msg="Adding changed secure port into Git")
         if not WOService.reload_service(self, 'nginx'):
@@ -132,21 +133,22 @@ class WOSecureController(CementBaseController):
     @expose(hide=True)
     def secure_ip(self):
         """IP whitelisting"""
-        WOGit.add(self, ["/etc/nginx"],
-                  msg="Add Nginx to into Git")
+        if os.path.exists('/etc/nginx'):
+            WOGit.add(self, ["/etc/nginx"],
+                      msg="Add Nginx to into Git")
         pargs = self.app.pargs
         if not pargs.user_input:
             ip = input("Enter the comma separated IP addresses "
                        "to white list [127.0.0.1]:")
             pargs.user_input = ip
         try:
-            user_ip = pargs.user_input.split(',')
+            user_ip = pargs.user_input.strip().split(',')
         except Exception as e:
             Log.debug(self, "{0}".format(e))
             user_ip = ['127.0.0.1']
         for ip_addr in user_ip:
-            if not ("exist_ip_address "+ip_addr in open('/etc/nginx/common/'
-                                                        'acl.conf').read()):
+            if not ("exist_ip_address " + ip_addr in open('/etc/nginx/common/'
+                                                          'acl.conf').read()):
                 WOShellExec.cmd_exec(self, "sed -i "
                                      "\"/deny/i allow {whitelist_address}\;\""
                                      " /etc/nginx/common/acl.conf"
@@ -169,8 +171,9 @@ class WOSecureController(CementBaseController):
                                  'Harden SSH security [y/N]')
             if start_secure != "Y" and start_secure != "y":
                 Log.error(self, "Not hardening SSH security")
-        WOGit.add(self, ["/etc/ssh"],
-                  msg="Adding SSH into Git")
+        if os.path.exists('/etc/ssh'):
+            WOGit.add(self, ["/etc/ssh"],
+                      msg="Adding SSH into Git")
         Log.debug(self, "check if /etc/ssh/sshd_config exist")
         if os.path.isfile('/etc/ssh/sshd_config'):
             Log.debug(self, "looking for the current ssh port")

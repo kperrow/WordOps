@@ -16,6 +16,8 @@ from wo.core.mysql import WOMysql
 from wo.core.services import WOService
 from wo.core.shellexec import WOShellExec
 from wo.core.variables import WOVar
+from wo.core.nginx import check_config
+from wo.core.git import WOGit
 
 
 def wo_stack_hook(app):
@@ -41,14 +43,10 @@ class WOStackController(CementBaseController):
                 dict(help='Install Nginx stack', action='store_true')),
             (['--php'],
                 dict(help='Install PHP 7.2 stack', action='store_true')),
-            (['--php72'],
-                dict(help='Install PHP 7.2 stack', action='store_true')),
-            (['--php73'],
-                dict(help='Install PHP 7.3 stack', action='store_true')),
-            (['--php74'],
-                dict(help='Install PHP 7.4 stack', action='store_true')),
             (['--mysql'],
                 dict(help='Install MySQL stack', action='store_true')),
+            (['--mariadb'],
+                dict(help='Install MySQL stack alias', action='store_true')),
             (['--mysqlclient'],
                 dict(help='Install MySQL client for remote MySQL server',
                      action='store_true')),
@@ -94,10 +92,18 @@ class WOStackController(CementBaseController):
             (['--nanorc'],
                 dict(help='Install nanorc syntax highlighting',
                      action='store_true')),
+            (['--brotli'],
+                dict(help='Enable/Disable Brotli compression for Nginx',
+                     action='store_true')),
             (['--force'],
                 dict(help='Force install/remove/purge without prompt',
                      action='store_true')),
         ]
+        for php_version, php_number in WOVar.wo_php_versions.items():
+            arguments.append(([f'--{php_version}'],
+                              dict(help=f'Install PHP {php_number} stack',
+                                   action='store_true')))
+
         usage = "wo stack (command) [options]"
 
     @expose(hide=True)
@@ -113,36 +119,28 @@ class WOStackController(CementBaseController):
 
         try:
             # Default action for stack installation
-            if not (pargs.web or pargs.admin or pargs.nginx or
-                    pargs.php or pargs.php72 or pargs.php73 or pargs.php74 or
-                    pargs.mysql or pargs.wpcli or pargs.phpmyadmin or
-                    pargs.composer or pargs.netdata or pargs.composer or
-                    pargs.dashboard or pargs.fail2ban or pargs.security or
-                    pargs.mysqlclient or pargs.mysqltuner or
-                    pargs.admin or pargs.adminer or
-                    pargs.utils or pargs.redis or
-                    pargs.proftpd or pargs.extplorer or
-                    pargs.clamav or pargs.cheat or pargs.nanorc or
-                    pargs.ufw or pargs.ngxblocker or
-                    pargs.phpredisadmin or pargs.sendmail or pargs.all):
+            if all(value is None or value is False for value in vars(pargs).values()):
                 pargs.web = True
                 pargs.admin = True
                 pargs.fail2ban = True
 
-            if pargs.php:
-                pargs.php72 = True
+            if pargs.mariadb:
+                pargs.mysql = True
 
             if pargs.all:
                 pargs.web = True
                 pargs.admin = True
-                pargs.php73 = True
                 pargs.php74 = True
+                pargs.php80 = True
+                pargs.php81 = True
+                pargs.php82 = True
+                pargs.php83 = True
                 pargs.redis = True
                 pargs.proftpd = True
 
             if pargs.web:
+                pargs.php = True
                 pargs.nginx = True
-                pargs.php72 = True
                 pargs.mysql = True
                 pargs.wpcli = True
                 pargs.sendmail = True
@@ -158,15 +156,22 @@ class WOStackController(CementBaseController):
                 pargs.phpredisadmin = True
                 pargs.extplorer = True
                 pargs.cheat = True
+                pargs.nanorc = True
 
             if pargs.security:
                 pargs.fail2ban = True
                 pargs.clamav = True
                 pargs.ngxblocker = True
 
+            if pargs.php:
+                if self.app.config.has_section('php'):
+                    config_php_ver = self.app.config.get(
+                        'php', 'version')
+                    current_php = config_php_ver.replace(".", "")
+                    setattr(self.app.pargs, 'php{0}'.format(current_php), True)
+
             # Nginx
             if pargs.nginx:
-                pargs.ngxblocker = True
                 Log.debug(self, "Setting apt_packages variable for Nginx")
                 if not WOAptGet.is_exec(self, 'nginx'):
                     apt_packages = apt_packages + WOVar.wo_nginx
@@ -179,43 +184,30 @@ class WOStackController(CementBaseController):
                     apt_packages = apt_packages + WOVar.wo_redis
 
                 else:
-                    Log.info(self, "Redis already installed")
+                    Log.debug(self, "Redis already installed")
 
-            # PHP 7.2
-            if pargs.php72:
-                Log.debug(self, "Setting apt_packages variable for PHP 7.2")
-                if not (WOAptGet.is_installed(self, 'php7.2-fpm')):
-                    apt_packages = (apt_packages + WOVar.wo_php72 +
-                                    WOVar.wo_php_extra)
-                else:
-                    Log.debug(self, "PHP 7.2 already installed")
-                    Log.info(self, "PHP 7.2 already installed")
+            wo_vars = {
+                'php74': WOVar.wo_php74,
+                'php80': WOVar.wo_php80,
+                'php81': WOVar.wo_php81,
+                'php82': WOVar.wo_php82,
+                'php83': WOVar.wo_php83,
+            }
 
-            # PHP 7.3
-            if pargs.php73:
-                Log.debug(self, "Setting apt_packages variable for PHP 7.3")
-                if not WOAptGet.is_installed(self, 'php7.3-fpm'):
-                    apt_packages = (apt_packages + WOVar.wo_php73 +
-                                    WOVar.wo_php_extra)
-                else:
-                    Log.debug(self, "PHP 7.3 already installed")
-                    Log.info(self, "PHP 7.3 already installed")
+            for parg_version, version in WOVar.wo_php_versions.items():
+                if getattr(pargs, parg_version, False):
+                    Log.debug(self, f"Setting apt_packages variable for PHP {version}")
+                    if not WOAptGet.is_installed(self, f'php{version}-fpm'):
+                        apt_packages = apt_packages + wo_vars[parg_version] + WOVar.wo_php_extra
+                    else:
+                        Log.debug(self, f"PHP {version} already installed")
+                        Log.info(self, f"PHP {version} already installed")
 
-            # PHP 7.4
-            if pargs.php74:
-                Log.debug(self, "Setting apt_packages variable for PHP 7.4")
-                if not WOAptGet.is_installed(self, 'php7.4-fpm'):
-                    apt_packages = (apt_packages + WOVar.wo_php74 +
-                                    WOVar.wo_php_extra)
-                else:
-                    Log.debug(self, "PHP 7.4 already installed")
-                    Log.info(self, "PHP 7.4 already installed")
-
-            # MariaDB 10.3
+            # MariaDB
             if pargs.mysql:
                 pargs.mysqltuner = True
                 Log.debug(self, "Setting apt_packages variable for MySQL")
-                if not WOShellExec.cmd_exec(self, "mysqladmin ping"):
+                if not WOMysql.mariadb_ping(self):
                     apt_packages = apt_packages + WOVar.wo_mysql
                 else:
                     Log.debug(self, "MySQL already installed and alive")
@@ -225,7 +217,7 @@ class WOStackController(CementBaseController):
             if pargs.mysqlclient:
                 Log.debug(self, "Setting apt_packages variable "
                           "for MySQL Client")
-                if not WOShellExec.cmd_exec(self, "mysqladmin ping"):
+                if not WOMysql.mariadb_ping(self):
                     apt_packages = apt_packages + WOVar.wo_mysql_client
                 else:
                     Log.debug(self, "MySQL already installed and alive")
@@ -235,10 +227,7 @@ class WOStackController(CementBaseController):
             if pargs.wpcli:
                 Log.debug(self, "Setting packages variable for WP-CLI")
                 if not WOAptGet.is_exec(self, 'wp'):
-                    packages = packages + [["https://github.com/wp-cli/wp-cli/"
-                                            "releases/download/v{0}/"
-                                            "wp-cli-{0}.phar"
-                                            "".format(WOVar.wo_wp_cli),
+                    packages = packages + [[f"{WOVar.wpcli_url}"
                                             "/usr/local/bin/wp",
                                             "WP-CLI"]]
                 else:
@@ -293,16 +282,38 @@ class WOStackController(CementBaseController):
                     Log.debug(self, "ProFTPd already installed")
                     Log.info(self, "ProFTPd already installed")
 
+            # brotli
+            if pargs.brotli:
+                Log.wait(self, "Enabling Brotli")
+                WOGit.add(self, ["/etc/nginx"], msg="Commiting pending changes")
+                if os.path.exists('/etc/nginx/conf.d/brotli.conf.disabled'):
+                    WOFileUtils.mvfile(self, '/etc/nginx/conf.d/brotli.conf.disabled',
+                                       '/etc/nginx/conf.d/brotli.conf')
+                else:
+                    Log.failed(self, "Enabling Brotli")
+                    Log.error(self, "Brotli is already enabled")
+                if os.path.exists('/etc/nginx/conf.d/gzip.conf'):
+                    WOFileUtils.mvfile(self, '/etc/nginx/conf.d/gzip.conf',
+                                       '/etc/nginx/conf.d/gzip.conf.disabled')
+                if check_config(self):
+                    Log.valide(self, "Enabling Brotli")
+                    WOGit.add(self, ["/etc/nginx"], msg="Enabling Brotli")
+                    WOService.reload_service(self, "nginx")
+                else:
+                    Log.failed(self, "Enabling Brotli")
+                    WOGit.rollback(self, ["/etc/nginx"])
+
             # PHPMYADMIN
             if pargs.phpmyadmin:
                 pargs.composer = True
                 if not os.path.isdir('/var/www/22222/htdocs/db/pma'):
                     Log.debug(self, "Setting packages variable "
                               "for phpMyAdmin ")
-                    packages = packages + [["https://github.com/phpmyadmin/"
-                                            "phpmyadmin/archive/STABLE.tar.gz",
-                                            "/var/lib/wo/tmp/pma.tar.gz",
-                                            "phpMyAdmin"]]
+                    packages = packages + [[
+                        "https://www.phpmyadmin.net/"
+                        "downloads/phpMyAdmin-latest-all-languages.tar.gz",
+                        "/var/lib/wo/tmp/pma.tar.gz",
+                        "PHPMyAdmin"]]
                 else:
                     Log.debug(self, "phpMyAdmin already installed")
                     Log.info(self, "phpMyAdmin already installed")
@@ -345,10 +356,7 @@ class WOStackController(CementBaseController):
                                       .format(WOVar.wo_webroot)):
                     Log.debug(self, "Setting packages variable for Adminer ")
                     packages = packages + [[
-                        "https://github.com/vrana/adminer/"
-                        "releases/download/v{0}"
-                        "/adminer-{0}.php"
-                        .format(WOVar.wo_adminer),
+                        "https://www.adminer.org/latest.php",
                         "{0}22222/"
                         "htdocs/db/adminer/index.php"
                         .format(WOVar.wo_webroot),
@@ -385,16 +393,9 @@ class WOStackController(CementBaseController):
                         os.path.isdir("/etc/netdata")):
                     Log.debug(
                         self, "Setting packages variable for Netdata")
-                    if WOVar.wo_distro == 'raspbian':
-                        packages = packages + [['https://my-netdata.io/'
-                                                'kickstart.sh',
-                                                '/var/lib/wo/tmp/kickstart.sh',
-                                                'Netdata']]
-                    else:
-                        packages = packages + [['https://my-netdata.io/'
-                                                'kickstart-static64.sh',
-                                                '/var/lib/wo/tmp/kickstart.sh',
-                                                'Netdata']]
+                    packages = packages + [[f"{WOVar.netdata_script_url}",
+                                            '/var/lib/wo/tmp/kickstart.sh',
+                                            'Netdata']]
                 else:
                     Log.debug(self, "Netdata already installed")
                     Log.info(self, "Netdata already installed")
@@ -468,11 +469,15 @@ class WOStackController(CementBaseController):
 
             # UTILS
             if pargs.utils:
-                if not WOShellExec.cmd_exec(self, 'mysqladmin ping'):
+                if not WOMysql.mariadb_ping(self):
                     pargs.mysql = True
                 if not (WOAptGet.is_installed(self, 'php7.2-fpm') or
                         WOAptGet.is_installed(self, 'php7.3-fpm') or
-                        WOAptGet.is_installed(self, 'php7.4-fpm')):
+                        WOAptGet.is_installed(self, 'php7.4-fpm') or
+                        WOAptGet.is_installed(self, 'php8.0-fpm') or
+                        WOAptGet.is_installed(self, 'php8.1-fpm') or
+                        WOAptGet.is_installed(self, 'php8.2-fpm') or
+                        WOAptGet.is_installed(self, 'php8.3-fpm')):
                     pargs.php = True
                 Log.debug(self, "Setting packages variable for utils")
                 packages = packages + [[
@@ -504,11 +509,7 @@ class WOStackController(CementBaseController):
                     ["https://www.percona.com/"
                      "get/pt-query-digest",
                      "/usr/bin/pt-query-advisor",
-                     "pt-query-advisor"],
-                    ["https://github.com/box/Anemometer/"
-                     "archive/master.tar.gz",
-                     '/var/lib/wo/tmp/anemometer.tar.gz',
-                     'Anemometer']]
+                     "pt-query-advisor"]]
 
         except Exception as e:
             Log.debug(self, "{0}".format(e))
@@ -554,31 +555,28 @@ class WOStackController(CementBaseController):
         apt_packages = []
         packages = []
         pargs = self.app.pargs
-        if ((not pargs.web) and (not pargs.admin) and
-            (not pargs.nginx) and (not pargs.php) and
-            (not pargs.mysql) and (not pargs.wpcli) and
-            (not pargs.phpmyadmin) and (not pargs.composer) and
-                (not pargs.netdata) and (not pargs.dashboard) and
-                (not pargs.fail2ban) and (not pargs.security) and
-                (not pargs.mysqlclient) and (not pargs.mysqltuner) and
-                (not pargs.adminer) and (not pargs.utils) and
-                (not pargs.redis) and (not pargs.proftpd) and
-                (not pargs.extplorer) and (not pargs.clamav) and
-                (not pargs.cheat) and (not pargs.nanorc) and
-                (not pargs.ufw) and (not pargs.ngxblocker) and
-                (not pargs.phpredisadmin) and (not pargs.sendmail) and
-                (not pargs.php73) and (not pargs.php74) and
-                (not pargs.php72) and (not pargs.all)):
+        if all(value is None or value is False for value in vars(pargs).values()):
             self.app.args.print_help()
 
         if pargs.php:
-            pargs.php72 = True
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
+
+        if pargs.mariadb:
+            pargs.mysql = True
 
         if pargs.all:
             pargs.web = True
             pargs.admin = True
             pargs.php73 = True
             pargs.php74 = True
+            pargs.php80 = True
+            pargs.php81 = True
+            pargs.php82 = True
+            pargs.php83 = True
             pargs.fail2ban = True
             pargs.proftpd = True
             pargs.utils = True
@@ -589,7 +587,7 @@ class WOStackController(CementBaseController):
 
         if pargs.web:
             pargs.nginx = True
-            pargs.php72 = True
+            pargs.php = True
             pargs.mysql = True
             pargs.wpcli = True
             pargs.sendmail = True
@@ -613,41 +611,32 @@ class WOStackController(CementBaseController):
                 Log.debug(self, "Removing apt_packages variable of Nginx")
                 apt_packages = apt_packages + WOVar.wo_nginx
 
-        # PHP 7.2
-        if pargs.php72:
-            Log.debug(self, "Setting apt_packages variable for PHP 7.2")
-            if (WOAptGet.is_installed(self, 'php7.2-fpm')):
-                apt_packages = apt_packages + WOVar.wo_php72
-                if not (WOAptGet.is_installed(self, 'php7.3-fpm') or
-                        WOAptGet.is_installed(self, 'php7.4-fpm')):
-                    apt_packages = apt_packages + WOVar.wo_php_extra
-            else:
-                Log.debug(self, "PHP 7.2 is not installed")
-                Log.info(self, "PHP 7.2 is not installed")
+        # Create a dictionary that maps PHP versions to corresponding variables.
+        wo_vars = {
+            'php74': WOVar.wo_php74,
+            'php80': WOVar.wo_php80,
+            'php81': WOVar.wo_php81,
+            'php82': WOVar.wo_php82,
+            'php83': WOVar.wo_php83,
+        }
 
-        # PHP 7.3
-        if pargs.php73:
-            Log.debug(self, "Setting apt_packages variable for PHP 7.3")
-            if WOAptGet.is_installed(self, 'php7.3-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php73
-                if not (WOAptGet.is_installed(self, 'php7.2-fpm') or
-                        WOAptGet.is_installed(self, 'php7.4-fpm')):
-                    apt_packages = apt_packages + WOVar.wo_php_extra
-            else:
-                Log.debug(self, "PHP 7.3 is not installed")
-                Log.info(self, "PHP 7.3 is not installed")
+        # Loop through all versions.
+        for parg_version, version in WOVar.wo_php_versions.items():
+            # Check if this version is present in pargs.
+            if getattr(pargs, parg_version):
+                Log.debug(self, f"Setting apt_packages variable for PHP {version}")
 
-        # PHP 7.4
-        if pargs.php74:
-            Log.debug(self, "Setting apt_packages variable for PHP 7.4")
-            if WOAptGet.is_installed(self, 'php7.4-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php74
-                if not (WOAptGet.is_installed(self, 'php7.3-fpm') or
-                        WOAptGet.is_installed(self, 'php7.2-fpm')):
-                    apt_packages = apt_packages + WOVar.wo_php_extra
-            else:
-                Log.debug(self, "PHP 7.4 is not installed")
-                Log.info(self, "PHP 7.4 is not installed")
+                if WOAptGet.is_installed(self, f'php{version}-fpm'):
+                    apt_packages += wo_vars[parg_version]
+
+                    # Check if other versions are installed.
+                    if not any(WOAptGet.is_installed(self, f'php{other_version}-fpm') for
+                               other_version in WOVar.wo_php_versions.values() if other_version != version):
+                        apt_packages += WOVar.wo_php_extra
+
+                else:
+                    Log.debug(self, f"PHP {version} is not installed")
+                    Log.info(self, f"PHP {version} is not installed")
 
         # REDIS
         if pargs.redis:
@@ -665,7 +654,7 @@ class WOStackController(CementBaseController):
         if pargs.mysqlclient:
             Log.debug(self, "Removing apt_packages variable "
                       "for MySQL Client")
-            if WOShellExec.cmd_exec(self, "mysqladmin ping"):
+            if WOMysql.mariadb_ping(self):
                 apt_packages = apt_packages + WOVar.wo_mysql_client
 
         # fail2ban
@@ -691,6 +680,27 @@ class WOStackController(CementBaseController):
             if WOAptGet.is_installed(self, 'proftpd-basic'):
                 Log.debug(self, "Remove apt_packages variable for ProFTPd")
                 apt_packages = apt_packages + ["proftpd-basic"]
+
+        # brotli
+        if pargs.brotli:
+            Log.wait(self, "Disabling Brotli")
+            WOGit.add(self, ["/etc/nginx"], msg="Commiting pending changes")
+            if os.path.exists('/etc/nginx/conf.d/brotli.conf'):
+                WOFileUtils.mvfile(self, '/etc/nginx/conf.d/brotli.conf',
+                                   '/etc/nginx/conf.d/brotli.conf.disabled')
+            else:
+                Log.failed(self, "Disabling Brotli")
+                Log.error(self, "Brotli is already disabled")
+            if os.path.exists('/etc/nginx/conf.d/gzip.conf.disabled'):
+                WOFileUtils.mvfile(self, '/etc/nginx/conf.d/gzip.conf.disabled',
+                                   '/etc/nginx/conf.d/gzip.conf')
+            if check_config(self):
+                Log.valide(self, "Disabling Brotli")
+                WOGit.add(self, ["/etc/nginx"], msg="Disabling Brotli")
+                WOService.reload_service(self, "nginx")
+            else:
+                Log.failed(self, "Disabling Brotli")
+                WOGit.rollback(self, ["/etc/nginx"])
 
         # UFW
         if pargs.ufw:
@@ -767,9 +777,9 @@ class WOStackController(CementBaseController):
 
         # netdata
         if pargs.netdata:
-            Log.debug(self, "Removing Netdata")
-            if os.path.isfile('/opt/netdata/usr/'
-                              'libexec/netdata/netdata-uninstaller.sh'):
+            if (os.path.exists('/opt/netdata') or
+                    os.path.exists('/etc/netdata')):
+                Log.debug(self, "Removing Netdata")
                 packages = packages + ['/var/lib/wo/tmp/kickstart.sh']
 
         # wordops dashboard
@@ -814,20 +824,28 @@ class WOStackController(CementBaseController):
                 WOService.stop_service(self, 'mysql')
 
             # Netdata uninstaller
-            if (set(['/var/lib/wo/tmp/'
-                     'kickstart.sh']).issubset(set(packages))):
-                if WOVar.wo_distro == 'Raspbian':
+            if '/var/lib/wo/tmp/kickstart.sh' in packages:
+                if os.path.exists(
+                        '/usr/libexec/netdata/netdata-uninstaller.sh'):
+                    Log.debug(self, "Uninstalling Netdata from /etc/netdata")
                     WOShellExec.cmd_exec(
-                        self, "bash /usr/"
-                        "libexec/netdata/"
-                        "netdata-uninstaller.sh -y -f",
+                        self, "bash /usr/libexec/netdata/netdata-"
+                        "uninstaller.sh -y -f",
                         errormsg='', log=False)
+                    packages = packages + ["/etc/netdata"]
+                elif os.path.exists(
+                    '/opt/netdata/usr/libexec/'
+                        'netdata/netdata-uninstaller.sh'):
+                    Log.debug(self, "Uninstalling Netdata from /opt/netdata")
+                    WOShellExec.cmd_exec(
+                        self, "bash /opt/netdata/usr/libexec/netdata/netdata-"
+                        "uninstaller.sh -y -f")
+                    packages = packages + ["/opt/netdata"]
                 else:
-                    WOShellExec.cmd_exec(
-                        self, "bash /opt/netdata/usr/"
-                        "libexec/netdata/"
-                        "netdata-uninstaller.sh -y -f",
-                        errormsg='', log=False)
+                    Log.debug(self, "Netdata uninstaller not found")
+                if WOMysql.mariadb_ping(self):
+                    WOMysql.execute(
+                        self, "DELETE FROM mysql.user WHERE User = 'netdata';")
 
             if (packages):
                 Log.wait(self, "Removing packages           ")
@@ -859,31 +877,27 @@ class WOStackController(CementBaseController):
         packages = []
         pargs = self.app.pargs
         # Default action for stack purge
-        if ((not pargs.web) and (not pargs.admin) and
-            (not pargs.nginx) and (not pargs.php) and
-            (not pargs.mysql) and (not pargs.wpcli) and
-            (not pargs.phpmyadmin) and (not pargs.composer) and
-                (not pargs.netdata) and (not pargs.dashboard) and
-                (not pargs.fail2ban) and (not pargs.security) and
-                (not pargs.mysqlclient) and (not pargs.mysqltuner) and
-                (not pargs.adminer) and (not pargs.utils) and
-                (not pargs.redis) and (not pargs.proftpd) and
-                (not pargs.extplorer) and (not pargs.clamav) and
-                (not pargs.cheat) and (not pargs.nanorc) and
-                (not pargs.ufw) and (not pargs.ngxblocker) and
-                (not pargs.phpredisadmin) and (not pargs.sendmail) and
-                (not pargs.php73) and (not pargs.php74) and
-                (not pargs.php72) and (not pargs.all)):
+        if all(value is None or value is False for value in vars(pargs).values()):
             self.app.args.print_help()
 
         if pargs.php:
-            pargs.php72 = True
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
+
+        if pargs.mariadb:
+            pargs.mysql = True
 
         if pargs.all:
             pargs.web = True
             pargs.admin = True
-            pargs.php73 = True
             pargs.php74 = True
+            pargs.php80 = True
+            pargs.php81 = True
+            pargs.php82 = True
+            pargs.php83 = True
             pargs.fail2ban = True
             pargs.proftpd = True
             pargs.utils = True
@@ -892,7 +906,7 @@ class WOStackController(CementBaseController):
 
         if pargs.web:
             pargs.nginx = True
-            pargs.php72 = True
+            pargs.php = True
             pargs.mysql = True
             pargs.wpcli = True
             pargs.sendmail = True
@@ -919,41 +933,22 @@ class WOStackController(CementBaseController):
             else:
                 Log.info(self, "Nginx is not installed")
 
-        # PHP 7.2
-        if pargs.php72:
-            Log.debug(self, "Setting apt_packages variable for PHP 7.2")
-            if (WOAptGet.is_installed(self, 'php7.2-fpm')):
-                apt_packages = apt_packages + WOVar.wo_php72
-                if not (WOAptGet.is_installed(self, 'php7.3-fpm') or
-                        WOAptGet.is_installed(self, 'php7.4-fpm')):
-                    apt_packages = apt_packages + WOVar.wo_php_extra
-            else:
-                Log.debug(self, "PHP 7.2 is not installed")
-                Log.info(self, "PHP 7.2 is not installed")
+        wo_vars = {
+            'php74': WOVar.wo_php74,
+            'php80': WOVar.wo_php80,
+            'php81': WOVar.wo_php81,
+            'php82': WOVar.wo_php82,
+            'php83': WOVar.wo_php83,
+        }
 
-        # PHP 7.3
-        if pargs.php73:
-            Log.debug(self, "Setting apt_packages variable for PHP 7.3")
-            if WOAptGet.is_installed(self, 'php7.3-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php73
-                if not (WOAptGet.is_installed(self, 'php7.2-fpm') or
-                        WOAptGet.is_installed(self, 'php7.4-fpm')):
-                    apt_packages = apt_packages + WOVar.wo_php_extra
-            else:
-                Log.debug(self, "PHP 7.3 is not installed")
-                Log.info(self, "PHP 7.3 is not installed")
-
-        # PHP 7.4
-        if pargs.php74:
-            Log.debug(self, "Setting apt_packages variable for PHP 7.4")
-            if WOAptGet.is_installed(self, 'php7.4-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php74
-                if not (WOAptGet.is_installed(self, 'php7.3-fpm') or
-                        WOAptGet.is_installed(self, 'php7.2-fpm')):
-                    apt_packages = apt_packages + WOVar.wo_php_extra
-            else:
-                Log.debug(self, "PHP 7.4 is not installed")
-                Log.info(self, "PHP 7.4 is not installed")
+        for parg_version, version in WOVar.wo_php_versions.items():
+            if getattr(pargs, parg_version, False):
+                Log.debug(self, f"Setting apt_packages variable for PHP {version}")
+                if not WOAptGet.is_installed(self, f'php{version}-fpm'):
+                    apt_packages = apt_packages + wo_vars[parg_version]
+                else:
+                    Log.debug(self, f"PHP {version} already purged")
+                    Log.info(self, f"PHP {version} already purged")
 
         # REDIS
         if pargs.redis:
@@ -976,7 +971,7 @@ class WOStackController(CementBaseController):
 
         # mysqlclient
         if pargs.mysqlclient:
-            if WOShellExec.cmd_exec(self, "mysqladmin ping"):
+            if WOMysql.mariadb_ping(self):
                 Log.debug(self, "Add MySQL client to apt_packages list")
                 apt_packages = apt_packages + WOVar.wo_mysql_client
 
@@ -1079,11 +1074,11 @@ class WOStackController(CementBaseController):
                                    '{0}22222/htdocs/db/anemometer'
                                    .format(WOVar.wo_webroot)
                                    ]
-
+        # netdata
         if pargs.netdata:
-            Log.debug(self, "Removing Netdata")
-            if os.path.isfile('/opt/netdata/usr/'
-                              'libexec/netdata/netdata-uninstaller.sh'):
+            if (os.path.exists('/opt/netdata') or
+                    os.path.exists('/etc/netdata')):
+                Log.debug(self, "Removing Netdata")
                 packages = packages + ['/var/lib/wo/tmp/kickstart.sh']
 
         # wordops dashboard
@@ -1116,31 +1111,40 @@ class WOStackController(CementBaseController):
                 if start_purge != "Y" and start_purge != "y":
                     Log.error(self, "Not starting stack purge")
 
-            if (set(["nginx-custom"]).issubset(set(apt_packages))):
+            if "nginx-custom" in apt_packages:
                 WOService.stop_service(self, 'nginx')
 
-            if (set(["fail2ban"]).issubset(set(apt_packages))):
+            if "fail2ban" in apt_packages:
                 WOService.stop_service(self, 'fail2ban')
 
-            if (set(["mariadb-server"]).issubset(set(apt_packages))):
-                if (os.path.isfile('/usr/bin/mysql') and
-                        os.path.isdir('/var/lib/mysql')):
-                    WOMysql.backupAll(self)
-                    WOService.stop_service(self, 'mysql')
+            if "mariadb-server" in apt_packages:
+                if self.app.config.has_section('mysql'):
+                    if self.app.config.get(
+                            'mysql', 'grant-host') == 'localhost':
+                        WOMysql.backupAll(self)
+                WOService.stop_service(self, 'mysql')
 
             # Netdata uninstaller
-            if (set(['/var/lib/wo/tmp/'
-                     'kickstart.sh']).issubset(set(packages))):
-                if WOVar.wo_distro == 'Raspbian':
-                    WOShellExec.cmd_exec(self, "bash /usr/"
-                                         "libexec/netdata/netdata-"
-                                         "uninstaller.sh -y -f",
-                                         errormsg='', log=False)
+            if '/var/lib/wo/tmp/kickstart.sh' in packages:
+                if os.path.exists(
+                        '/usr/libexec/netdata/netdata-uninstaller.sh'):
+                    Log.debug(self, "Uninstalling Netdata from /etc/netdata")
+                    WOShellExec.cmd_exec(
+                        self, "bash /usr/libexec/netdata/netdata-"
+                        "uninstaller.sh -y -f",
+                        errormsg='', log=False)
+                    packages = packages + ["/etc/netdata"]
+                elif os.path.exists(
+                    '/opt/netdata/usr/libexec/'
+                        'netdata/netdata-uninstaller.sh'):
+                    Log.debug(self, "Uninstalling Netdata from /opt/netdata")
+                    WOShellExec.cmd_exec(
+                        self, "bash /opt/netdata/usr/libexec/netdata/netdata-"
+                        "uninstaller.sh -y -f")
+                    packages = packages + ["/opt/netdata"]
                 else:
-                    WOShellExec.cmd_exec(self, "bash /opt/netdata/usr/"
-                                         "libexec/netdata/netdata-"
-                                         "uninstaller.sh -y -f")
-                if WOShellExec.cmd_exec(self, 'mysqladmin ping'):
+                    Log.debug(self, "Netdata uninstaller not found")
+                if WOMysql.mariadb_ping(self):
                     WOMysql.execute(
                         self, "DELETE FROM mysql.user WHERE User = 'netdata';")
 

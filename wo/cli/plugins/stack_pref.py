@@ -5,7 +5,6 @@ import shutil
 import string
 
 import psutil
-import requests
 from wo.core.apt_repo import WORepo
 from wo.core.aptget import WOAptGet
 from wo.core.cron import WOCron
@@ -21,6 +20,8 @@ from wo.core.sslutils import SSL
 from wo.core.template import WOTemplate
 from wo.core.variables import WOVar
 from wo.core.stackconf import WOConf
+from wo.core.download import WODownload
+from wo.core.checkfqdn import WOFqdn
 
 
 def pre_pref(self, apt_packages):
@@ -28,71 +29,42 @@ def pre_pref(self, apt_packages):
 
     if ("mariadb-server" in apt_packages or "mariadb-client" in apt_packages):
         # add mariadb repository excepted on raspbian and ubuntu 19.04
-        if (not WOVar.wo_distro == 'raspbian'):
+        if not (WOVar.wo_distro == 'raspbian'):
             Log.info(self, "Adding repository for MySQL, please wait...")
             mysql_pref = (
-                "Package: *\nPin: origin mariadb.mirrors.ovh.net"
+                "Package: *\nPin: origin  deb.mariadb.org"
                 "\nPin-Priority: 1000\n")
             with open('/etc/apt/preferences.d/'
                       'MariaDB.pref', 'w') as mysql_pref_file:
                 mysql_pref_file.write(mysql_pref)
-            WORepo.add(self, repo_url=WOVar.wo_mysql_repo)
-            WORepo.add_key(self, '0xcbcb082a1bb943db',
-                           keyserver='keyserver.ubuntu.com')
-            WORepo.add_key(self, '0xF1656F24C74CD1D8',
-                           keyserver='keyserver.ubuntu.com')
-    if "mariadb-server" in apt_packages:
+            if self.app.config.has_section('mariadb'):
+                mariadb_ver = self.app.config.get(
+                    'mariadb', 'release')
+                wo_mysql_repo_conf = ("deb [signed-by=/etc/apt/keyrings/mariadb-keyring.pgp] "
+                                      "http://deb.mariadb.org/"
+                                      f"{mariadb_ver}/{WOVar.wo_distro} {WOVar.wo_platform_codename} main")
+            else:
+                wo_mysql_repo_conf = WOVar.wo_mysql_repo
+            # APT repositories
+            WORepo.add(self, repo_url=wo_mysql_repo_conf, repo_name="mariadb")
+    if ("mariadb-server" in apt_packages and
+            not os.path.exists('/etc/mysql/conf.d/my.cnf')):
         # generate random 24 characters root password
         chars = ''.join(random.sample(string.ascii_letters, 24))
-
-        Log.debug(self, "Pre-seeding MySQL")
-        Log.debug(self, "echo \"mariadb-server-{0} "
-                  "mysql-server/root_password "
-                  "password \" | "
-                  "debconf-set-selections"
-                  .format(WOVar.mariadb_ver))
-        try:
-            WOShellExec.cmd_exec(self, "echo \"mariadb-server-{0} "
-                                 "mysql-server/root_password "
-                                 "password {chars}\" | "
-                                 "debconf-set-selections"
-                                 .format(WOVar.mariadb_ver, chars=chars),
-                                 log=False)
-        except CommandExecutionError as e:
-            Log.debug(self, "{0}".format(e))
-            Log.error(self, "Failed to initialize MySQL package")
-
-        Log.debug(self, "echo \"mariadb-server-{0} "
-                  "mysql-server/root_password_again "
-                  "password \" | "
-                  "debconf-set-selections"
-                  .format(WOVar.mariadb_ver))
-        try:
-            WOShellExec.cmd_exec(self, "echo \"mariadb-server-{0} "
-                                 "mysql-server/root_password_again "
-                                 "password {chars}\" | "
-                                 "debconf-set-selections"
-                                 .format(WOVar.mariadb_ver, chars=chars),
-                                 log=False)
-        except CommandExecutionError as e:
-            Log.debug(self, "{0}".format(e))
-            Log.error(self, "Failed to initialize MySQL package")
         # generate my.cnf root credentials
         mysql_config = """
             [client]
             user = root
             password = {chars}
+            socket = /run/mysqld/mysqld.sock
             """.format(chars=chars)
         config = configparser.ConfigParser()
         config.read_string(mysql_config)
         Log.debug(self, 'Writting configuration into MySQL file')
-        conf_path = "/etc/mysql/conf.d/my.cnf"
+        conf_path = "/etc/mysql/conf.d/my.cnf.tmp"
         os.makedirs(os.path.dirname(conf_path), exist_ok=True)
-        with open(conf_path, encoding='utf-8',
-                  mode='w') as configfile:
+        with os.fdopen(os.open(conf_path, os.O_WRONLY | os.O_CREAT, 0o600), 'w', encoding='utf-8') as configfile:
             config.write(configfile)
-        Log.debug(self, 'Setting my.cnf permission')
-        WOFileUtils.chmod(self, "/etc/mysql/conf.d/my.cnf", 0o600)
 
     # add nginx repository
     if set(WOVar.wo_nginx).issubset(set(apt_packages)):
@@ -101,17 +73,19 @@ def pre_pref(self, apt_packages):
             WORepo.add(self, ppa=WOVar.wo_nginx_repo)
             Log.debug(self, 'Adding ppa for Nginx')
         else:
-            if not WOFileUtils.grepcheck(
-                    self, '/etc/apt/sources.list/wo-repo.list',
-                    'WordOps'):
+            if not os.path.exists('/etc/apt/sources.list.d/wordops.list'):
                 Log.info(self, "Adding repository for NGINX, please wait...")
                 Log.debug(self, 'Adding repository for Nginx')
-                WORepo.add(self, repo_url=WOVar.wo_nginx_repo)
-            WORepo.add_key(self, WOVar.wo_nginx_key)
+                WORepo.add(self, repo_url=WOVar.wo_nginx_repo, repo_name="wordops")
 
     # add php repository
     if (('php7.3-fpm' in apt_packages) or
-            ('php7.2-fpm' in apt_packages) or ('php7.4-fpm' in apt_packages)):
+            ('php7.2-fpm' in apt_packages) or
+            ('php7.4-fpm' in apt_packages) or
+            ('php8.0-fpm' in apt_packages) or
+            ('php8.1-fpm' in apt_packages) or
+            ('php8.2-fpm' in apt_packages) or
+            ('php8.3-fpm' in apt_packages)):
         if (WOVar.wo_distro == 'ubuntu'):
             Log.debug(self, 'Adding ppa for PHP')
             Log.info(self, "Adding repository for PHP, please wait...")
@@ -127,35 +101,15 @@ def pre_pref(self, apt_packages):
                         'PHP.pref', mode='w',
                         encoding='utf-8') as php_pref_file:
                     php_pref_file.write(php_pref)
-            if not WOFileUtils.grepcheck(
-                    self, '/etc/apt/sources.list.d/wo-repo.list',
-                    'packages.sury.org'):
+            if not os.path.exists('/etc/apt/sources.list.d/php.list'):
                 Log.debug(self, 'Adding repo_url of php for debian')
                 Log.info(self, "Adding repository for PHP, please wait...")
-                WORepo.add(self, repo_url=WOVar.wo_php_repo)
-            Log.debug(self, 'Adding deb.sury GPG key')
-            WORepo.add_key(self, WOVar.wo_php_key)
+                WORepo.add(self, repo_url=WOVar.wo_php_repo, repo_name="php")
+
     # add redis repository
     if set(WOVar.wo_redis).issubset(set(apt_packages)):
-        if WOVar.wo_distro == 'ubuntu':
-            Log.info(self, "Adding repository for Redis, please wait...")
-            Log.debug(self, 'Adding ppa for redis')
-            WORepo.add(self, ppa=WOVar.wo_redis_repo)
-        else:
-            if not WOFileUtils.grepcheck(
-                    self, '/etc/apt/sources.list/wo-repo.list',
-                    'WordOps'):
-                Log.info(self, "Adding repository for Redis, please wait...")
-                WORepo.add(self, repo_url=WOVar.wo_nginx_repo)
-            WORepo.add_key(self, WOVar.wo_nginx_key)
-
-    # nano
-    if 'nano' in apt_packages:
-        if WOVar.wo_distro == 'ubuntu':
-            if (WOVar.wo_platform_codename == 'bionic' or
-                    WOVar.wo_platform_codename == 'xenial'):
-                Log.debug(self, 'Adding ppa for nano')
-                WORepo.add(self, ppa=WOVar.wo_ubuntu_backports)
+        if not os.path.exists('/etc/apt/sources.list.d/redis.list'):
+            WORepo.add(self, repo_url=WOVar.wo_redis_repo, repo_name="redis")
 
 
 def post_pref(self, apt_packages, packages, upgrade=False):
@@ -163,7 +117,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
     if (apt_packages):
         # Nginx configuration
         if set(WOVar.wo_nginx).issubset(set(apt_packages)):
-            Log.info(self, "Applying Nginx configuration templates")
+            Log.wait(self, "Configuring Nginx")
             # Nginx main configuration
             ngxcnf = '/etc/nginx/conf.d'
             ngxcom = '/etc/nginx/common'
@@ -172,7 +126,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
             data = dict(tls13=True, release=WOVar.wo_version)
             WOTemplate.deploy(self,
                               '/etc/nginx/nginx.conf',
-                              'nginx-core.mustache', data)
+                              'nginx-core.mustache', data, overwrite=True)
 
             if not os.path.isfile('{0}/gzip.conf.disabled'.format(ngxcnf)):
                 data = dict(release=WOVar.wo_version)
@@ -195,6 +149,19 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                           encoding='utf-8', mode='a') as wo_nginx:
                     wo_nginx.write('fastcgi_param \tSCRIPT_FILENAME '
                                    '\t$request_filename;\n')
+            if not WOFileUtils.grep(self, '/etc/nginx/fastcgi_params',
+                                    'HTTP_HOST'):
+                WOFileUtils.textappend(self, '/etc/nginx/fastcgi_params',
+                                       '# Fix for HTTP/3 QUIC HTTP_HOST\n'
+                                       'fastcgi_param\tHTTP_HOST\t$host;\n')
+            if not WOFileUtils.grep(self, '/etc/nginx/proxy_params',
+                                    'X-Forwarded-Host'):
+                WOFileUtils.textappend(self, '/etc/nginx/proxy_params',
+                                       'proxy_set_header X-Forwarded-Host $host;\n')
+            if not WOFileUtils.grep(self, '/etc/nginx/proxy_params',
+                                    'X-Forwarded-Port'):
+                WOFileUtils.textappend(self, '/etc/nginx/proxy_params',
+                                       'proxy_set_header X-Forwarded-Port $server_port;\n')
             try:
                 data = dict(php="9000", debug="9001",
                             php7="9070", debug7="9170",
@@ -213,11 +180,9 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                 WOTemplate.deploy(
                     self, '{0}/webp.conf'.format(ngxcnf),
                     'webp.mustache', data, overwrite=False)
-
                 WOTemplate.deploy(
-                    self, '{0}/cloudflare.conf'.format(ngxcnf),
-                    'cloudflare.mustache', data)
-
+                    self, '{0}/avif.conf'.format(ngxcnf),
+                    'avif.mustache', data, overwrite=False)
                 WOTemplate.deploy(
                     self,
                     '{0}/map-wp-fastcgi-cache.conf'.format(ngxcnf),
@@ -239,44 +204,21 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                                   '{0}/locations-wo.conf'
                                   .format(ngxcom),
                                   'locations.mustache', data)
+                # traffic advice file
+                WOTemplate.deploy(self,
+                                  '/var/www/html/'
+                                  '.well-known/traffic-advice',
+                                  'traffic-advice.mustache', data)
 
                 WOTemplate.deploy(self,
                                   '{0}/wpsubdir.conf'
                                   .format(ngxcom),
                                   'wpsubdir.mustache', data)
 
-                wo_php_version = ["php72", "php73", "php74"]
-                for wo_php in wo_php_version:
+                for wo_php in WOVar.wo_php_versions:
                     data = dict(upstream="{0}".format(wo_php),
                                 release=WOVar.wo_version)
-                    WOTemplate.deploy(self,
-                                      '{0}/{1}.conf'
-                                      .format(ngxcom, wo_php),
-                                      'php.mustache', data)
-
-                    WOTemplate.deploy(
-                        self, '{0}/redis-{1}.conf'.format(ngxcom, wo_php),
-                        'redis.mustache', data)
-
-                    WOTemplate.deploy(
-                        self, '{0}/wpcommon-{1}.conf'.format(ngxcom, wo_php),
-                        'wpcommon.mustache', data)
-
-                    WOTemplate.deploy(
-                        self, '{0}/wpfc-{1}.conf'.format(ngxcom, wo_php),
-                        'wpfc.mustache', data)
-
-                    WOTemplate.deploy(
-                        self, '{0}/wpsc-{1}.conf'.format(ngxcom, wo_php),
-                        'wpsc.mustache', data)
-
-                    WOTemplate.deploy(
-                        self, '{0}/wprocket-{1}.conf'.format(ngxcom, wo_php),
-                        'wprocket.mustache', data)
-
-                    WOTemplate.deploy(
-                        self, '{0}/wpce-{1}.conf'.format(ngxcom, wo_php),
-                        'wpce.mustache', data)
+                    WOConf.nginxcommon(self)
 
             except CommandExecutionError as e:
                 Log.debug(self, "{0}".format(e))
@@ -316,7 +258,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                         "$upstream_response_time "
                         "$srcache_fetch_status "
                         "[$time_local] '\n"
-                        "'$http_host \"$request\" $status"
+                        "'$host \"$request\" $status"
                         " $body_bytes_sent '\n"
                         "'\"$http_referer\" "
                         "\"$http_user_agent\"';\n")
@@ -341,11 +283,28 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                 os.makedirs('/etc/nginx/sites-enabled')
 
             # 22222 port settings
-            data = dict(webroot=ngxroot, release=WOVar.wo_version)
+            if os.path.exists('/etc/nginx/sites-available/22222'):
+                Log.debug(self, "looking for the current backend port")
+                for line in open('/etc/nginx/sites-available/22222',
+                                 encoding='utf-8'):
+                    if 'listen' in line:
+                        listen_line = line.strip()
+                        break
+                port = (listen_line).split(' ')
+                current_backend_port = (port[1]).strip()
+            else:
+                current_backend_port = '22222'
+
+            if 'current_backend_port' not in locals():
+                current_backend_port = '22222'
+
+            data = dict(webroot=ngxroot,
+                        release=WOVar.wo_version, port=current_backend_port)
             WOTemplate.deploy(
                 self,
                 '/etc/nginx/sites-available/22222',
                 '22222.mustache', data, overwrite=True)
+
             passwd = ''.join([random.choice
                               (string.ascii_letters + string.digits)
                               for n in range(24)])
@@ -353,7 +312,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                 try:
                     WOShellExec.cmd_exec(
                         self, "printf \"WordOps:"
-                        "$(openssl passwd -crypt "
+                        "$(openssl passwd -apr1 "
                         "{password} 2> /dev/null)\n\""
                         "> /etc/nginx/htpasswd-wo "
                         "2>/dev/null"
@@ -416,16 +375,19 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                                    .format(ngxroot))):
                 SSL.selfsignedcert(self, proftpd=False, backend=True)
 
-            if not os.path.isfile('{0}22222/conf/nginx/ssl.conf'
+            if not os.path.exists('{0}22222/conf/nginx/ssl.conf'
                                   .format(ngxroot)):
                 with open("/var/www/22222/conf/nginx/"
                           "ssl.conf", "w") as php_file:
                     php_file.write("ssl_certificate "
                                    "/var/www/22222/cert/22222.crt;\n"
                                    "ssl_certificate_key "
-                                   "/var/www/22222/cert/22222.key;\n")
+                                   "/var/www/22222/cert/22222.key;\n"
+                                   "ssl_stapling off;\n")
 
-                server_ip = requests.get('http://v4.wordops.eu')
+                server_ip = WOFqdn.get_server_ip(self)
+                if server_ip is None:
+                    server_ip = WOVar.wo_fqdn
 
                 if set(["nginx"]).issubset(set(apt_packages)):
                     print("WordOps backend configuration was successful\n"
@@ -439,22 +401,20 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                                             "Name: WordOps"] +
                                 ["HTTP Auth Password : {0}"
                                  .format(passwd)])
-                    self.msg = (self.msg + ["WordOps backend is available "
-                                            "on https://{0}:22222 "
-                                            "or https://{1}:22222"
-                                            .format(server_ip.text,
-                                                    WOVar.wo_fqdn)])
+                    self.msg = (self.msg + [f'WordOps backend is available on https://{server_ip}:22222 '
+                                            f'or https://{WOVar.wo_fqdn}:22222'])
 
-            if not os.path.isfile("/opt/cf-update.sh"):
-                data = dict(release=WOVar.wo_version)
-                WOTemplate.deploy(self, '/opt/cf-update.sh',
-                                  'cf-update.mustache',
-                                  data, overwrite=False)
-                WOFileUtils.chmod(self, "/opt/cf-update.sh", 0o775)
-                WOCron.setcron_weekly(self, '/opt/cf-update.sh '
-                                      '> /dev/null 2>&1',
-                                      comment='Cloudflare IP refresh cronjob '
-                                      'added by WordOps')
+            data = dict(release=WOVar.wo_version)
+            WOTemplate.deploy(self, '/opt/cf-update.sh',
+                              'cf-update.mustache',
+                              data, overwrite=True)
+            WOFileUtils.chmod(self, "/opt/cf-update.sh", 0o775)
+            Log.debug(self, 'Creating Cloudflare.conf')
+            WOShellExec.cmd_exec(self, '/opt/cf-update.sh')
+            WOCron.setcron_weekly(self, '/opt/cf-update.sh '
+                                  '> /dev/null 2>&1',
+                                  comment='Cloudflare IP refresh cronjob '
+                                  'added by WordOps')
 
             # Nginx Configation into GIT
             if not WOService.restart_service(self, 'nginx'):
@@ -473,6 +433,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                             "Use the command nginx -t to identify "
                             "the cause of this issue", False)
             else:
+                Log.valide(self, "Configuring Nginx")
                 WOGit.add(self, ["/etc/nginx"], msg="Adding Nginx into Git")
                 if not os.path.isdir('/etc/systemd/system/nginx.service.d'):
                     WOFileUtils.mkdir(self,
@@ -486,25 +447,38 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                     WOShellExec.cmd_exec(self, 'systemctl daemon-reload')
                     WOService.restart_service(self, 'nginx')
 
-        if set(WOVar.wo_php72).issubset(set(apt_packages)):
+        # php conf
+        php_list = []
+        for version in list(WOVar.wo_php_versions.values()):
+            package_name = 'php' + version + '-fpm'
+            if package_name in apt_packages:
+                php_list.append([version])
+
+        for php_version in php_list:
             WOGit.add(self, ["/etc/php"], msg="Adding PHP into Git")
-            Log.info(self, "Configuring php7.2-fpm")
+            Log.wait(self, "Configuring php{0}-fpm".format(php_version[0]))
             ngxroot = '/var/www/'
 
             # Create log directories
-            if not os.path.exists('/var/log/php/7.2/'):
-                Log.debug(self, 'Creating directory /var/log/php/7.2/')
-                os.makedirs('/var/log/php/7.2/')
+            if not os.path.exists('/var/log/php/{0}/'.format(php_version[0])):
+                Log.debug(
+                    self, 'Creating directory /var/log/php/{0}/'
+                    .format(php_version[0]))
+                os.makedirs('/var/log/php/{0}/'.format(php_version[0]))
 
-            if not os.path.isfile('/etc/php/7.2/fpm/php.ini.orig'):
-                WOFileUtils.copyfile(self, '/etc/php/7.2/fpm/php.ini',
-                                     '/etc/php/7.2/fpm/php.ini.orig')
+            if not os.path.isfile(
+                    '/etc/php/{0}/fpm/php.ini.orig'.format(php_version[0])):
+                WOFileUtils.copyfile(self,
+                                     '/etc/php/{0}/fpm/php.ini'.format(
+                                         php_version[0]),
+                                     '/etc/php/{0}/fpm/php.ini.orig'
+                                     .format(php_version[0]))
 
-            # Parse etc/php/7.2/fpm/php.ini
+            # Parse etc/php/x.x/fpm/php.ini
             config = configparser.ConfigParser()
             Log.debug(self, "configuring php file "
-                      "/etc/php/7.2/fpm/php.ini")
-            config.read('/etc/php/7.2/fpm/php.ini.orig')
+                      "/etc/php/{0}/fpm/php.ini".format(php_version[0]))
+            config.read('/etc/php/{0}/fpm/php.ini.orig'.format(php_version[0]))
             config['PHP']['expose_php'] = 'Off'
             config['PHP']['post_max_size'] = '100M'
             config['PHP']['upload_max_filesize'] = '100M'
@@ -520,51 +494,70 @@ def post_pref(self, apt_packages, packages, upgrade=False):
             config['opcache']['opcache.revalidate_freq'] = '5'
             config['opcache']['opcache.consistency_checks'] = '0'
             config['opcache']['opcache.validate_timestamps'] = '1'
-            with open('/etc/php/7.2/fpm/php.ini',
+            with open('/etc/php/{0}/fpm/php.ini'.format(php_version[0]),
                       encoding='utf-8', mode='w') as configfile:
                 Log.debug(self, "Writting php configuration into "
-                          "/etc/php/7.2/fpm/php.ini")
+                          "/etc/php/{0}/fpm/php.ini".format(php_version[0]))
                 config.write(configfile)
 
-            # Render php-fpm pool template for php7.3
-            data = dict(pid="/run/php/php7.2-fpm.pid",
-                        error_log="/var/log/php7.2-fpm.log",
-                        include="/etc/php/7.2/fpm/pool.d/*.conf")
+            # Render php-fpm pool template for phpx.x
+            data = dict(pid="/run/php/php{0}-fpm.pid".format(php_version[0]),
+                        error_log="/var/log/php{0}-fpm.log".format(
+                            php_version[0]),
+                        include="/etc/php/{0}/fpm/pool.d/*.conf"
+                        .format(php_version[0]))
             WOTemplate.deploy(
-                self, '/etc/php/7.2/fpm/php-fpm.conf',
+                self, '/etc/php/{0}/fpm/php-fpm.conf'.format(php_version[0]),
                 'php-fpm.mustache', data)
-
-            data = dict(pool='www-php72', listen='php72-fpm.sock',
+            php_short = php_version[0].replace(".", "")
+            data = dict(pool='www-php{0}'.format(php_short),
+                        listen='php{0}-fpm.sock'.format(php_short),
                         user='www-data',
                         group='www-data', listenuser='root',
                         listengroup='www-data', openbasedir=True)
-            WOTemplate.deploy(self, '/etc/php/7.2/fpm/pool.d/www.conf',
+            WOTemplate.deploy(self, '/etc/php/{0}/fpm/pool.d/www.conf'
+                              .format(php_version[0]),
                               'php-pool.mustache', data)
-            data = dict(pool='www-two-php72', listen='php72-two-fpm.sock',
+            data = dict(pool='www-two-php{0}'.format(php_short),
+                        listen='php{0}-two-fpm.sock'.format(php_short),
                         user='www-data',
                         group='www-data', listenuser='root',
                         listengroup='www-data', openbasedir=True)
-            WOTemplate.deploy(self, '/etc/php/7.2/fpm/pool.d/www-two.conf',
+            WOTemplate.deploy(self,
+                              '/etc/php/{0}/fpm/pool.d/www-two.conf'.format(
+                                  php_version[0]),
                               'php-pool.mustache', data)
 
-            # Generate /etc/php/7.2/fpm/pool.d/debug.conf
-            WOFileUtils.copyfile(self, "/etc/php/7.2/fpm/pool.d/www.conf",
-                                 "/etc/php/7.2/fpm/pool.d/debug.conf")
-            WOFileUtils.searchreplace(self, "/etc/php/7.2/fpm/pool.d/"
-                                      "debug.conf", "[www-php72]", "[debug]")
+            # Generate /etc/php/x.x/fpm/pool.d/debug.conf
+            WOFileUtils.copyfile(self,
+                                 "/etc/php/{0}/fpm/pool.d/www.conf".format(
+                                     php_version[0]),
+                                 "/etc/php/{0}/fpm/pool.d/debug.conf"
+                                 .format(php_version[0]))
+            WOFileUtils.searchreplace(self,
+                                      "/etc/php/{0}/fpm/pool.d/"
+                                      "debug.conf".format(php_version[0]),
+                                      "[www-php{0}]".format(php_short),
+                                      "[debug]")
             config = configparser.ConfigParser()
-            config.read('/etc/php/7.2/fpm/pool.d/debug.conf')
-            config['debug']['listen'] = '127.0.0.1:9172'
+            config.read(
+                '/etc/php/{0}/fpm/pool.d/debug.conf'.format(php_version[0]))
+            config['debug']['listen'] = '127.0.0.1:91{0}'.format(php_short)
             config['debug']['rlimit_core'] = 'unlimited'
-            config['debug']['slowlog'] = '/var/log/php/7.2/slow.log'
+            config['debug']['slowlog'] = '/var/log/php/{0}/slow.log'.format(
+                php_version[0])
             config['debug']['request_slowlog_timeout'] = '10s'
-            with open('/etc/php/7.2/fpm/pool.d/debug.conf',
+            with open('/etc/php/{0}/fpm/pool.d/debug.conf'
+                      .format(php_version[0]),
                       encoding='utf-8', mode='w') as confifile:
-                Log.debug(self, "writting PHP7.2 configuration into "
-                          "/etc/php/7.2/fpm/pool.d/debug.conf")
+                Log.debug(self,
+                          "writting PHP configuration into "
+                          "/etc/php/{0}/fpm/pool.d/debug.conf"
+                          .format(php_version[0]))
                 config.write(confifile)
 
-            with open("/etc/php/7.2/fpm/pool.d/debug.conf",
+            with open("/etc/php/{0}/fpm/pool.d/debug.conf"
+                      .format(php_version[0]),
                       encoding='utf-8', mode='a') as myfile:
                 myfile.write("php_admin_value[xdebug.profiler_output_dir] "
                              "= /tmp/ \nphp_admin_value[xdebug.profiler_"
@@ -575,11 +568,11 @@ def post_pref(self, apt_packages, packages, upgrade=False):
 
             # Disable xdebug
             if not WOShellExec.cmd_exec(self, "grep -q \';zend_extension\'"
-                                        " /etc/php/7.2/mods-available/"
-                                        "xdebug.ini"):
-                WOFileUtils.searchreplace(self, "/etc/php/7.2/"
+                                        " /etc/php/{0}/mods-available/"
+                                        "xdebug.ini".format(php_version[0])):
+                WOFileUtils.searchreplace(self, "/etc/php/{0}/"
                                           "mods-available/"
-                                          "xdebug.ini",
+                                          "xdebug.ini".format(php_version[0]),
                                           "zend_extension",
                                           ";zend_extension")
 
@@ -591,11 +584,11 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                           .format(ngxroot))
                 os.makedirs('{0}22222/htdocs/fpm/status/'
                             .format(ngxroot))
-                open('{0}22222/htdocs/fpm/status/debug72'
-                     .format(ngxroot),
+                open('{0}22222/htdocs/fpm/status/debug{1}'
+                     .format(ngxroot, php_short),
                      encoding='utf-8', mode='a').close()
-                open('{0}22222/htdocs/fpm/status/php72'
-                     .format(ngxroot),
+                open('{0}22222/htdocs/fpm/status/php{1}'
+                     .format(ngxroot, php_short),
                      encoding='utf-8', mode='a').close()
 
             # Write info.php
@@ -612,14 +605,14 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                           encoding='utf-8', mode='w') as myfile:
                     myfile.write("<?php\nphpinfo();\n?>")
 
-            # write opcache clean for php72
+            # write opcache clean for phpxx
             if not os.path.exists('{0}22222/htdocs/cache/opcache'
                                   .format(ngxroot)):
                 os.makedirs('{0}22222/htdocs/cache/opcache'
                             .format(ngxroot))
             WOFileUtils.textwrite(
-                self, '{0}22222/htdocs/cache/opcache/php72.php'
-                .format(ngxroot),
+                self, '{0}22222/htdocs/cache/opcache/php{1}.php'
+                .format(ngxroot, php_short),
                 '<?php opcache_reset(); ?>')
 
             WOFileUtils.chown(self, "{0}22222/htdocs"
@@ -627,309 +620,26 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                               'www-data',
                               'www-data', recursive=True)
 
+            # enable imagick php extension
+            WOShellExec.cmd_exec(self, 'phpenmod -v ALL imagick')
+
             # check service restart or rollback configuration
-            if not WOService.restart_service(self, 'php7.2-fpm'):
+            if not WOService.restart_service(self,
+                                             'php{0}-fpm'
+                                             .format(php_version[0])):
                 WOGit.rollback(self, ["/etc/php"], msg="Rollback PHP")
             else:
-                WOGit.add(self, ["/etc/php"], msg="Adding PHP into Git")
-
-        # PHP7.3 configuration
-        if set(WOVar.wo_php73).issubset(set(apt_packages)):
-            WOGit.add(self, ["/etc/php"], msg="Adding PHP into Git")
-            Log.info(self, "Configuring php7.3-fpm")
-            ngxroot = '/var/www/'
-            # Create log directories
-            if not os.path.exists('/var/log/php/7.3/'):
-                Log.debug(self, 'Creating directory /var/log/php/7.3/')
-                os.makedirs('/var/log/php/7.3/')
-
-            if not os.path.isfile('/etc/php/7.3/fpm/php.ini.orig'):
-                WOFileUtils.copyfile(self, '/etc/php/7.3/fpm/php.ini',
-                                     '/etc/php/7.3/fpm/php.ini.orig')
-
-            # Parse etc/php/7.3/fpm/php.ini
-            config = configparser.ConfigParser()
-            Log.debug(self, "configuring php file /etc/php/7.3/"
-                      "fpm/php.ini")
-            config.read('/etc/php/7.3/fpm/php.ini.orig')
-            config['PHP']['expose_php'] = 'Off'
-            config['PHP']['post_max_size'] = '100M'
-            config['PHP']['upload_max_filesize'] = '100M'
-            config['PHP']['max_execution_time'] = '300'
-            config['PHP']['max_input_time'] = '300'
-            config['PHP']['max_input_vars'] = '20000'
-            config['Date']['date.timezone'] = WOVar.wo_timezone
-            config['opcache']['opcache.enable'] = '1'
-            config['opcache']['opcache.interned_strings_buffer'] = '8'
-            config['opcache']['opcache.max_accelerated_files'] = '10000'
-            config['opcache']['opcache.memory_consumption'] = '256'
-            config['opcache']['opcache.save_comments'] = '1'
-            config['opcache']['opcache.revalidate_freq'] = '5'
-            config['opcache']['opcache.consistency_checks'] = '0'
-            config['opcache']['opcache.validate_timestamps'] = '1'
-            with open('/etc/php/7.3/fpm/php.ini',
-                      encoding='utf-8', mode='w') as configfile:
-                Log.debug(self, "Writting php configuration into "
-                          "/etc/php/7.3/fpm/php.ini")
-                config.write(configfile)
-
-            # Render php-fpm pool template for php7.3
-            data = dict(pid="/run/php/php7.3-fpm.pid",
-                        error_log="/var/log/php7.3-fpm.log",
-                        include="/etc/php/7.3/fpm/pool.d/*.conf")
-            WOTemplate.deploy(
-                self, '/etc/php/7.3/fpm/php-fpm.conf',
-                'php-fpm.mustache', data)
-
-            data = dict(pool='www-php73', listen='php73-fpm.sock',
-                        user='www-data',
-                        group='www-data', listenuser='root',
-                        listengroup='www-data', openbasedir=True)
-            WOTemplate.deploy(self, '/etc/php/7.3/fpm/pool.d/www.conf',
-                              'php-pool.mustache', data)
-            data = dict(pool='www-two-php73', listen='php73-two-fpm.sock',
-                        user='www-data',
-                        group='www-data', listenuser='root',
-                        listengroup='www-data', openbasedir=True)
-            WOTemplate.deploy(self, '/etc/php/7.3/fpm/pool.d/www-two.conf',
-                              'php-pool.mustache', data)
-
-            # Generate /etc/php/7.3/fpm/pool.d/debug.conf
-            WOFileUtils.copyfile(self, "/etc/php/7.3/fpm/pool.d/www.conf",
-                                 "/etc/php/7.3/fpm/pool.d/debug.conf")
-            WOFileUtils.searchreplace(self, "/etc/php/7.3/fpm/pool.d/"
-                                      "debug.conf", "[www-php73]", "[debug]")
-            config = configparser.ConfigParser()
-            config.read('/etc/php/7.3/fpm/pool.d/debug.conf')
-            config['debug']['listen'] = '127.0.0.1:9173'
-            config['debug']['rlimit_core'] = 'unlimited'
-            config['debug']['slowlog'] = '/var/log/php/7.3/slow.log'
-            config['debug']['request_slowlog_timeout'] = '10s'
-            with open('/etc/php/7.3/fpm/pool.d/debug.conf',
-                      encoding='utf-8', mode='w') as confifile:
-                Log.debug(self, "writting PHP 7.3 configuration into "
-                          "/etc/php/7.3/fpm/pool.d/debug.conf")
-                config.write(confifile)
-
-            with open("/etc/php/7.3/fpm/pool.d/debug.conf",
-                      encoding='utf-8', mode='a') as myfile:
-                myfile.write(
-                    "php_admin_value[xdebug.profiler_output_dir] "
-                    "= /tmp/ \nphp_admin_value[xdebug.profiler_"
-                    "output_name] = cachegrind.out.%p-%H-%R "
-                    "\nphp_admin_flag[xdebug.profiler_enable"
-                    "_trigger] = on \nphp_admin_flag[xdebug."
-                    "profiler_enable] = off\n")
-
-            # Disable xdebug
-            if not WOShellExec.cmd_exec(
-                    self, "grep -q \';zend_extension\'"
-                    " /etc/php/7.3/mods-available/xdebug.ini"):
-                WOFileUtils.searchreplace(
-                    self, "/etc/php/7.3/mods-available/"
-                    "xdebug.ini",
-                    "zend_extension", ";zend_extension")
-
-            # PHP and Debug pull configuration
-            if not os.path.exists('{0}22222/htdocs/fpm/status/'
-                                  .format(ngxroot)):
-                Log.debug(self, 'Creating directory '
-                          '{0}22222/htdocs/fpm/status/ '
-                          .format(ngxroot))
-                os.makedirs('{0}22222/htdocs/fpm/status/'
-                            .format(ngxroot))
-            open('{0}22222/htdocs/fpm/status/debug73'
-                 .format(ngxroot),
-                 encoding='utf-8', mode='a').close()
-            open('{0}22222/htdocs/fpm/status/php73'
-                 .format(ngxroot),
-                 encoding='utf-8', mode='a').close()
-
-            # Write info.php
-            if not os.path.exists('{0}22222/htdocs/php/'
-                                  .format(ngxroot)):
-                Log.debug(self, 'Creating directory '
-                          '{0}22222/htdocs/php/ '
-                          .format(ngxroot))
-                os.makedirs('{0}22222/htdocs/php'
-                            .format(ngxroot))
-
-            with open("{0}22222/htdocs/php/info.php"
-                      .format(ngxroot),
-                      encoding='utf-8', mode='w') as myfile:
-                myfile.write("<?php\nphpinfo();\n?>")
-
-            # write opcache clean for php73
-            if not os.path.exists('{0}22222/htdocs/cache/opcache'
-                                  .format(ngxroot)):
-                os.makedirs('{0}22222/htdocs/cache/opcache'
-                            .format(ngxroot))
-            WOFileUtils.textwrite(
-                self, '{0}22222/htdocs/cache/opcache/php73.php'
-                .format(ngxroot),
-                '<?php opcache_reset(); ?>')
-
-            WOFileUtils.chown(self, "{0}22222/htdocs"
-                              .format(ngxroot),
-                              'www-data',
-                              'www-data', recursive=True)
-            # check service restart or rollback configuration
-            if not WOService.restart_service(self, 'php7.3-fpm'):
-                WOGit.rollback(self, ["/etc/php"], msg="Rollback PHP")
-            else:
-                WOGit.add(self, ["/etc/php"], msg="Adding PHP into Git")
-
-        # PHP7.4 configuration
-        # php7.4 configuration
-        if set(WOVar.wo_php74).issubset(set(apt_packages)):
-            WOGit.add(self, ["/etc/php"], msg="Adding PHP into Git")
-            Log.info(self, "Configuring php7.4-fpm")
-            ngxroot = '/var/www/'
-            # Create log directories
-            if not os.path.exists('/var/log/php/7.4/'):
-                Log.debug(self, 'Creating directory /var/log/php/7.4/')
-                os.makedirs('/var/log/php/7.4/')
-
-            if not os.path.isfile('/etc/php/7.4/fpm/php.ini.orig'):
-                WOFileUtils.copyfile(self, '/etc/php/7.4/fpm/php.ini',
-                                     '/etc/php/7.4/fpm/php.ini.orig')
-
-            # Parse etc/php/7.4/fpm/php.ini
-            config = configparser.ConfigParser()
-            Log.debug(self, "configuring php file /etc/php/7.4/"
-                      "fpm/php.ini")
-            config.read('/etc/php/7.4/fpm/php.ini.orig')
-            config['PHP']['expose_php'] = 'Off'
-            config['PHP']['post_max_size'] = '100M'
-            config['PHP']['upload_max_filesize'] = '100M'
-            config['PHP']['max_execution_time'] = '300'
-            config['PHP']['max_input_time'] = '300'
-            config['PHP']['max_input_vars'] = '20000'
-            config['Date']['date.timezone'] = WOVar.wo_timezone
-            config['opcache']['opcache.enable'] = '1'
-            config['opcache']['opcache.interned_strings_buffer'] = '8'
-            config['opcache']['opcache.max_accelerated_files'] = '10000'
-            config['opcache']['opcache.memory_consumption'] = '256'
-            config['opcache']['opcache.save_comments'] = '1'
-            config['opcache']['opcache.revalidate_freq'] = '5'
-            config['opcache']['opcache.consistency_checks'] = '0'
-            config['opcache']['opcache.validate_timestamps'] = '1'
-            with open('/etc/php/7.4/fpm/php.ini',
-                      encoding='utf-8', mode='w') as configfile:
-                Log.debug(self, "Writting php configuration into "
-                          "/etc/php/7.4/fpm/php.ini")
-                config.write(configfile)
-
-            # Render php-fpm pool template for php7.4
-            data = dict(pid="/run/php/php7.4-fpm.pid",
-                        error_log="/var/log/php7.4-fpm.log",
-                        include="/etc/php/7.4/fpm/pool.d/*.conf")
-            WOTemplate.deploy(
-                self, '/etc/php/7.4/fpm/php-fpm.conf',
-                'php-fpm.mustache', data)
-
-            data = dict(pool='www-php74', listen='php74-fpm.sock',
-                        user='www-data',
-                        group='www-data', listenuser='root',
-                        listengroup='www-data', openbasedir=True)
-            WOTemplate.deploy(self, '/etc/php/7.4/fpm/pool.d/www.conf',
-                              'php-pool.mustache', data)
-            data = dict(pool='www-two-php74', listen='php74-two-fpm.sock',
-                        user='www-data',
-                        group='www-data', listenuser='root',
-                        listengroup='www-data', openbasedir=True)
-            WOTemplate.deploy(self, '/etc/php/7.4/fpm/pool.d/www-two.conf',
-                              'php-pool.mustache', data)
-
-            # Generate /etc/php/7.4/fpm/pool.d/debug.conf
-            WOFileUtils.copyfile(self, "/etc/php/7.4/fpm/pool.d/www.conf",
-                                 "/etc/php/7.4/fpm/pool.d/debug.conf")
-            WOFileUtils.searchreplace(self, "/etc/php/7.4/fpm/pool.d/"
-                                      "debug.conf", "[www-php74]", "[debug]")
-            config = configparser.ConfigParser()
-            config.read('/etc/php/7.4/fpm/pool.d/debug.conf')
-            config['debug']['listen'] = '127.0.0.1:9174'
-            config['debug']['rlimit_core'] = 'unlimited'
-            config['debug']['slowlog'] = '/var/log/php/7.4/slow.log'
-            config['debug']['request_slowlog_timeout'] = '10s'
-            with open('/etc/php/7.4/fpm/pool.d/debug.conf',
-                      encoding='utf-8', mode='w') as confifile:
-                Log.debug(self, "writting PHP 7.4 configuration into "
-                          "/etc/php/7.4/fpm/pool.d/debug.conf")
-                config.write(confifile)
-
-            with open("/etc/php/7.4/fpm/pool.d/debug.conf",
-                      encoding='utf-8', mode='a') as myfile:
-                myfile.write(
-                    "php_admin_value[xdebug.profiler_output_dir] "
-                    "= /tmp/ \nphp_admin_value[xdebug.profiler_"
-                    "output_name] = cachegrind.out.%p-%H-%R "
-                    "\nphp_admin_flag[xdebug.profiler_enable"
-                    "_trigger] = on \nphp_admin_flag[xdebug."
-                    "profiler_enable] = off\n")
-
-            # Disable xdebug
-            if not WOShellExec.cmd_exec(
-                    self, "grep -q \';zend_extension\'"
-                    " /etc/php/7.4/mods-available/xdebug.ini"):
-                WOFileUtils.searchreplace(
-                    self, "/etc/php/7.4/mods-available/"
-                    "xdebug.ini",
-                    "zend_extension", ";zend_extension")
-
-            # PHP and Debug pull configuration
-            if not os.path.exists('{0}22222/htdocs/fpm/status/'
-                                  .format(ngxroot)):
-                Log.debug(self, 'Creating directory '
-                          '{0}22222/htdocs/fpm/status/ '
-                          .format(ngxroot))
-                os.makedirs('{0}22222/htdocs/fpm/status/'
-                            .format(ngxroot))
-            open('{0}22222/htdocs/fpm/status/debug74'
-                 .format(ngxroot),
-                 encoding='utf-8', mode='a').close()
-            open('{0}22222/htdocs/fpm/status/php74'
-                 .format(ngxroot),
-                 encoding='utf-8', mode='a').close()
-
-            # Write info.php
-            if not os.path.exists('{0}22222/htdocs/php/'
-                                  .format(ngxroot)):
-                Log.debug(self, 'Creating directory '
-                          '{0}22222/htdocs/php/ '
-                          .format(ngxroot))
-                os.makedirs('{0}22222/htdocs/php'
-                            .format(ngxroot))
-
-            WOFileUtils.textwrite(
-                self, "{0}22222/htdocs/php/info.php"
-                .format(ngxroot), "<?php\nphpinfo();\n?>")
-
-            # write opcache clean for php74
-            if not os.path.exists('{0}22222/htdocs/cache/opcache'
-                                  .format(ngxroot)):
-                os.makedirs('{0}22222/htdocs/cache/opcache'
-                            .format(ngxroot))
-            WOFileUtils.textwrite(
-                self, '{0}22222/htdocs/cache/opcache/php74.php'
-                .format(ngxroot),
-                '<?php opcache_reset(); ?>')
-
-            WOFileUtils.chown(self, "{0}22222/htdocs"
-                              .format(ngxroot),
-                              'www-data',
-                              'www-data', recursive=True)
-            # check service restart or rollback configuration
-            if not WOService.restart_service(self, 'php7.4-fpm'):
-                WOGit.rollback(self, ["/etc/php"], msg="Rollback PHP")
-            else:
+                Log.valide(
+                    self, "Configuring php{0}-fpm".format(php_version[0]))
                 WOGit.add(self, ["/etc/php"], msg="Adding PHP into Git")
 
             if os.path.exists('/etc/nginx/conf.d/upstream.conf'):
                 if not WOFileUtils.grepcheck(
-                        self, '/etc/nginx/conf.d/upstream.conf', 'php74'):
+                        self, '/etc/nginx/conf.d/upstream.conf',
+                        'php{0}'.format(php_short)):
                     data = dict(php="9000", debug="9001",
                                 php7="9070", debug7="9170",
+                                php8="9080", debug8="9180",
                                 release=WOVar.wo_version)
                     WOTemplate.deploy(
                         self, '/etc/nginx/conf.d/upstream.conf',
@@ -939,7 +649,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
         # create mysql config if it doesn't exist
         if "mariadb-server" in apt_packages:
             WOGit.add(self, ["/etc/mysql"], msg="Adding MySQL into Git")
-            if not os.path.isfile("/etc/mysql/my.cnf"):
+            if not os.path.exists("/etc/mysql/my.cnf"):
                 config = ("[mysqld]\nwait_timeout = 30\n"
                           "interactive_timeout=60\nperformance_schema = 0"
                           "\nquery_cache_type = 1")
@@ -948,24 +658,50 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                 config_file.write(config)
                 config_file.close()
             else:
-                if "PASSWORD" not in WOShellExec.cmd_exec_stdout(
-                        self, 'mysql -e "use mysql; show grants;"'):
+                # make sure root account have all privileges
+                if os.path.exists('/etc/mysql/conf.d/my.cnf.tmp'):
                     try:
-                        if not os.path.exists('/etc/mysql/conf.d/my.cnf'):
-                            Log.error(self, 'my.cnf not found')
                         config = configparser.ConfigParser()
-                        config.read('/etc/mysql/conf.d/my.cnf')
+                        config.read('/etc/mysql/conf.d/my.cnf.tmp')
                         chars = config['client']['password']
                         WOShellExec.cmd_exec(
-                            self, "mysql -e \"use mysql; "
-                            "GRANT ALL PRIVILEGES on "
-                            "*.* TO 'root'@'127.0.0.1' IDENTIFIED by "
-                            "'{0}' WITH GRANT OPTION\"".format(chars))
-                        WOShellExec.cmd_exec(
-                            self, 'mysql -e "flush privileges;"')
+                            self,
+                            'mysql -e "SET PASSWORD = '
+                            'PASSWORD(\'{0}\'); flush privileges;"'
+                            .format(chars), log=False)
+                        WOFileUtils.mvfile(
+                            self, '/etc/mysql/conf.d/my.cnf.tmp',
+                            '/etc/mysql/conf.d/my.cnf')
                     except CommandExecutionError:
                         Log.error(self, "Unable to set MySQL password")
-                Log.info(self, "Tuning MariaDB configuration")
+                    WOGit.add(self, ["/etc/mysql"],
+                              msg="Adding MySQL into Git")
+                elif os.path.exists('/etc/mysql/conf.d/my.cnf'):
+                    if ((WOAptGet.is_installed(
+                        self,
+                        'mariadb-server-{0}'.format(WOVar.mariadb_ver))) and
+                            not (WOFileUtils.grepcheck(
+                                self, '/etc/mysql/conf.d/my.cnf', 'socket'))):
+                        try:
+                            config = configparser.ConfigParser()
+                            config.read('/etc/mysql/conf.d/my.cnf')
+                            chars = config['client']['password']
+                            WOShellExec.cmd_exec(
+                                self,
+                                'mysql -e "ALTER USER root@localhost '
+                                'IDENTIFIED VIA unix_socket OR '
+                                'mysql_native_password; '
+                                'SET PASSWORD = PASSWORD(\'{0}\'); '
+                                'flush privileges;"'.format(chars), log=False)
+                            WOFileUtils.textappend(
+                                self, '/etc/mysql/conf.d/my.cnf',
+                                'socket = /run/mysqld/mysqld.sock')
+                        except CommandExecutionError:
+                            Log.error(self, "Unable to set MySQL password")
+                        WOGit.add(self, ["/etc/mysql"],
+                                  msg="Adding MySQL into Git")
+
+                Log.wait(self, "Tuning MariaDB configuration")
                 if not os.path.isfile("/etc/mysql/my.cnf.default-pkg"):
                     WOFileUtils.copyfile(self, "/etc/mysql/my.cnf",
                                          "/etc/mysql/my.cnf.default-pkg")
@@ -983,13 +719,21 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                 elif (wo_ram > 64000):
                     wo_innodb_instance = int(64)
                     tmp_table_size = int(256)
+                mariadbconf = bool(not os.path.exists(
+                    '/etc/mysql/mariadb.conf.d/50-server.cnf'))
                 data = dict(
                     tmp_table_size=tmp_table_size, inno_log=wo_ram_log_size,
                     inno_buffer=wo_ram_innodb,
                     inno_log_buffer=wo_ram_log_buffer,
-                    innodb_instances=wo_innodb_instance)
-                WOTemplate.deploy(
-                    self, '/etc/mysql/my.cnf', 'my.mustache', data)
+                    innodb_instances=wo_innodb_instance,
+                    newmariadb=mariadbconf, release=WOVar.wo_version)
+                if os.path.exists('/etc/mysql/mariadb.conf.d/50-server.cnf'):
+                    WOTemplate.deploy(
+                        self, '/etc/mysql/mariadb.conf.d/50-server.cnf',
+                        'my.mustache', data)
+                else:
+                    WOTemplate.deploy(
+                        self, '/etc/mysql/my.cnf', 'my.mustache', data)
                 # replacing default values
                 Log.debug(self, "Tuning MySQL configuration")
                 if os.path.isdir('/etc/systemd/system/mariadb.service.d'):
@@ -1002,15 +746,16 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                             'mariadb.service.d/limits.conf',
                             '[Service]\nLimitNOFILE=500000')
                         WOShellExec.cmd_exec(self, 'systemctl daemon-reload')
+                Log.valide(self, "Tuning MySQL configuration")
                 # set innodb_buffer_pool_instances depending
                 # on the amount of RAM
 
-                WOService.stop_service(self, 'mysql')
-                WOFileUtils.mvfile(self, '/var/lib/mysql/ib_logfile0',
-                                   '/var/lib/mysql/ib_logfile0.bak')
-                WOFileUtils.mvfile(self, '/var/lib/mysql/ib_logfile1',
-                                   '/var/lib/mysql/ib_logfile1.bak')
-                WOService.start_service(self, 'mysql')
+                WOService.restart_service(self, 'mariadb')
+
+                # WOFileUtils.mvfile(self, '/var/lib/mysql/ib_logfile0',
+                #                    '/var/lib/mysql/ib_logfile0.bak')
+                # WOFileUtils.mvfile(self, '/var/lib/mysql/ib_logfile1',
+                #                    '/var/lib/mysql/ib_logfile1.bak')
 
             WOCron.setcron_weekly(self, 'mysqlcheck -Aos --auto-repair '
                                   '> /dev/null 2>&1',
@@ -1021,32 +766,36 @@ def post_pref(self, apt_packages, packages, upgrade=False):
         # create fail2ban configuration files
         if "fail2ban" in apt_packages:
             WOService.restart_service(self, 'fail2ban')
-            WOGit.add(self, ["/etc/fail2ban"],
-                      msg="Adding Fail2ban into Git")
-            Log.info(self, "Configuring Fail2Ban")
-            data = dict(release=WOVar.wo_version)
-            WOTemplate.deploy(
-                self,
-                '/etc/fail2ban/jail.d/custom.conf',
-                'fail2ban.mustache',
-                data, overwrite=False)
-            WOTemplate.deploy(
-                self,
-                '/etc/fail2ban/filter.d/wo-wordpress.conf',
-                'fail2ban-wp.mustache',
-                data, overwrite=False)
-            WOTemplate.deploy(
-                self,
-                '/etc/fail2ban/filter.d/nginx-forbidden.conf',
-                'fail2ban-forbidden.mustache',
-                data, overwrite=False)
-
-            if not WOService.reload_service(self, 'fail2ban'):
-                WOGit.rollback(
-                    self, ['/etc/fail2ban'], msg="Rollback f2b config")
-            else:
+            if os.path.exists('/etc/fail2ban'):
                 WOGit.add(self, ["/etc/fail2ban"],
                           msg="Adding Fail2ban into Git")
+                Log.wait(self, "Configuring Fail2Ban")
+                nginxf2b = bool(os.path.exists('/var/log/nginx'))
+                data = dict(release=WOVar.wo_version, nginx=nginxf2b)
+                WOTemplate.deploy(
+                    self,
+                    '/etc/fail2ban/jail.d/custom.conf',
+                    'fail2ban.mustache',
+                    data, overwrite=True)
+                WOTemplate.deploy(
+                    self,
+                    '/etc/fail2ban/filter.d/wo-wordpress.conf',
+                    'fail2ban-wp.mustache',
+                    data, overwrite=False)
+                WOTemplate.deploy(
+                    self,
+                    '/etc/fail2ban/filter.d/nginx-forbidden.conf',
+                    'fail2ban-forbidden.mustache',
+                    data, overwrite=False)
+
+                if not WOShellExec.cmd_exec(self, 'fail2ban-client reload'):
+                    WOGit.rollback(
+                        self, ['/etc/fail2ban'], msg="Rollback f2b config")
+                    WOService.restart_service(self, 'fail2ban')
+                else:
+                    Log.valide(self, "Configuring Fail2Ban")
+                    WOGit.add(self, ["/etc/fail2ban"],
+                              msg="Adding Fail2ban into Git")
 
         # Proftpd configuration
         if "proftpd-basic" in apt_packages:
@@ -1054,18 +803,10 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                       msg="Adding ProFTPd into Git")
             if os.path.isfile("/etc/proftpd/proftpd.conf"):
                 Log.debug(self, "Setting up Proftpd configuration")
-                WOFileUtils.searchreplace(
-                    self, "/etc/proftpd/proftpd.conf",
-                    "# DefaultRoot", "DefaultRoot")
-                WOFileUtils.searchreplace(
-                    self, "/etc/proftpd/proftpd.conf",
-                    "# RequireValidShell", "RequireValidShell")
-                WOFileUtils.searchreplace(
-                    self, "/etc/proftpd/proftpd.conf",
-                    "# PassivePorts                  "
-                    "49152 65534",
-                    "PassivePorts              "
-                    "    49000 50000")
+                data = dict()
+                WOTemplate.deploy(self,
+                                  '/etc/proftpd/proftpd.conf',
+                                  'proftpd.mustache', data)
             # proftpd TLS configuration
             if not os.path.isdir("/etc/proftpd/ssl"):
                 WOFileUtils.mkdir(self, "/etc/proftpd/ssl")
@@ -1075,10 +816,6 @@ def post_pref(self, apt_packages, packages, upgrade=False):
             data = dict()
             WOTemplate.deploy(self, '/etc/proftpd/tls.conf',
                               'proftpd-tls.mustache', data)
-            WOFileUtils.searchreplace(self, "/etc/proftpd/"
-                                      "proftpd.conf",
-                                      "#Include /etc/proftpd/tls.conf",
-                                      "Include /etc/proftpd/tls.conf")
             WOService.restart_service(self, 'proftpd')
 
             if os.path.isfile('/etc/ufw/ufw.conf'):
@@ -1096,8 +833,8 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                         Log.debug(self, "{0}".format(e))
                         Log.error(self, "Unable to add UFW rules")
 
-            if ((os.path.isfile("/etc/fail2ban/jail.d/custom.conf")) and
-                (not WOFileUtils.grep(
+            if ((os.path.exists("/etc/fail2ban/jail.d/custom.conf")) and
+                (not WOFileUtils.grepcheck(
                     self, "/etc/fail2ban/jail.d/custom.conf",
                     "proftpd"))):
                 with open("/etc/fail2ban/jail.d/custom.conf",
@@ -1111,6 +848,16 @@ def post_pref(self, apt_packages, packages, upgrade=False):
             else:
                 WOGit.add(self, ["/etc/proftpd"],
                           msg="Adding ProFTPd into Git")
+
+        # Sendmail configuration
+        if "sendmail" in apt_packages:
+            if (os.path.exists("/usr/bin/yes") and
+                    os.path.exists("/usr/sbin/sendmailconfig")):
+                Log.wait(self, "Configuring Sendmail")
+                if WOShellExec.cmd_exec(self, "yes 'y' | sendmailconfig"):
+                    Log.valide(self, "Configuring Sendmail")
+                else:
+                    Log.failed(self, "Configuring Sendmail")
 
         if "ufw" in apt_packages:
             # check if ufw is already enabled
@@ -1150,7 +897,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                             "# Log format Settings\n"
                             "log_format rt_cache_redis '$remote_addr "
                             "$upstream_response_time $srcache_fetch_status "
-                            "[$time_local] '\n '$http_host \"$request\" "
+                            "[$time_local] '\n '$host \"$request\" "
                             "$status $body_bytes_sent '\n'\"$http_referer\" "
                             "\"$http_user_agent\"';\n")
             # set redis.conf parameter
@@ -1253,6 +1000,7 @@ def post_pref(self, apt_packages, packages, upgrade=False):
         # PHPMyAdmin
         if any('/var/lib/wo/tmp/pma.tar.gz' == x[1]
                for x in packages):
+            wo_phpmyadmin = WODownload.pma_release(self)
             WOExtract.extract(
                 self, '/var/lib/wo/tmp/pma.tar.gz', '/var/lib/wo/tmp/')
             Log.debug(self, 'Extracting file /var/lib/wo/tmp/pma.tar.gz to '
@@ -1266,7 +1014,9 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                             .format(WOVar.wo_webroot))
             if not os.path.exists('{0}22222/htdocs/db/pma/'
                                   .format(WOVar.wo_webroot)):
-                shutil.move('/var/lib/wo/tmp/phpmyadmin-STABLE/',
+                shutil.move('/var/lib/wo/tmp/phpMyAdmin-{0}'
+                            '-all-languages/'
+                            .format(wo_phpmyadmin),
                             '{0}22222/htdocs/db/pma/'
                             .format(WOVar.wo_webroot))
                 shutil.copyfile('{0}22222/htdocs/db/pma'
@@ -1386,27 +1136,29 @@ def post_pref(self, apt_packages, packages, upgrade=False):
             Log.wait(self, "Installing Netdata")
             WOShellExec.cmd_exec(
                 self, "bash /var/lib/wo/tmp/kickstart.sh "
-                "--dont-wait", errormsg='', log=False)
+                "--dont-wait --stable-channel",
+                errormsg='', log=False)
             Log.valide(self, "Installing Netdata")
-            if os.path.isdir('/etc/netdata'):
-                wo_netdata = "/"
-            elif os.path.isdir('/opt/netdata'):
-                wo_netdata = "/opt/netdata/"
+
             # disable mail notifications
-            WOFileUtils.searchreplace(
-                self, "{0}etc/netdata/orig/health_alarm_notify.conf"
-                .format(wo_netdata),
-                'SEND_EMAIL="YES"',
-                'SEND_EMAIL="NO"')
-            # make changes persistant
-            WOFileUtils.copyfile(
-                self, "{0}etc/netdata/orig/"
-                "health_alarm_notify.conf"
-                .format(wo_netdata),
-                "{0}etc/netdata/health_alarm_notify.conf"
-                .format(wo_netdata))
+            if os.path.exists('/usr/lib/netdata/conf.d/health_alarm_notify.conf'):
+                WOFileUtils.searchreplace(
+                    self, "/usr/lib/netdata/conf.d/health_alarm_notify.conf",
+                    'SEND_EMAIL="YES"',
+                    'SEND_EMAIL="NO"')
+
+            if os.path.exists('/etc/netdata/orig/health_alarm_notify.conf'):
+                WOFileUtils.searchreplace(
+                    self, "/etc/netdata/orig/health_alarm_notify.conf",
+                    'SEND_EMAIL="YES"',
+                    'SEND_EMAIL="NO"')
+            if self.app.config.has_section('mysql'):
+                wo_grant_host = self.app.config.get('mysql', 'grant-host')
+            else:
+                wo_grant_host = 'localhost'
             # check if mysql credentials are available
-            if WOShellExec.cmd_exec(self, "mysqladmin ping"):
+            if (WOMysql.mariadb_ping(self)
+                    and wo_grant_host == 'localhost'):
                 try:
                     WOMysql.execute(
                         self,
@@ -1427,11 +1179,6 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                     Log.debug(self, "{0}".format(e))
                     Log.info(
                         self, "fail to setup mysql user for netdata")
-            WOFileUtils.chown(self, '{0}etc/netdata'
-                              .format(wo_netdata),
-                              'netdata',
-                              'netdata',
-                              recursive=True)
             WOService.restart_service(self, 'netdata')
 
         # WordOps Dashboard
@@ -1530,62 +1277,6 @@ def post_pref(self, apt_packages, packages, upgrade=False):
                               'www-data',
                               'www-data',
                               recursive=True)
-        # anemometer
-        if any('/var/lib/wo/tmp/anemometer.tar.gz' == x[1]
-               for x in packages):
-            Log.debug(self, "Extracting file anemometer.tar.gz to "
-                      "location /var/lib/wo/tmp/ ")
-            WOExtract.extract(
-                self, '/var/lib/wo/tmp/anemometer.tar.gz',
-                '/var/lib/wo/tmp/')
-            if not os.path.exists('{0}22222/htdocs/db/'
-                                  .format(WOVar.wo_webroot)):
-                Log.debug(self, "Creating directory")
-                os.makedirs('{0}22222/htdocs/db/'
-                            .format(WOVar.wo_webroot))
-            if not os.path.exists('{0}22222/htdocs/db/anemometer'
-                                  .format(WOVar.wo_webroot)):
-                shutil.move('/var/lib/wo/tmp/Anemometer-master',
-                            '{0}22222/htdocs/db/anemometer'
-                            .format(WOVar.wo_webroot))
-                chars = ''.join(random.sample(string.ascii_letters, 8))
-                try:
-                    WOShellExec.cmd_exec(self, 'mysql < {0}22222/htdocs/db'
-                                         '/anemometer/install.sql'
-                                         .format(WOVar.wo_webroot))
-                except Exception as e:
-                    Log.debug(self, "{0}".format(e))
-                    Log.error(self, "failed to configure Anemometer",
-                              exit=False)
-                if self.app.config.has_section('mysql'):
-                    wo_grant_host = self.app.config.get('mysql', 'grant-host')
-                else:
-                    wo_grant_host = 'localhost'
-                WOMysql.execute(self, 'grant select on'
-                                ' *.* to \'anemometer\''
-                                '@\'{0}\' IDENTIFIED'
-                                ' BY \'{1}\''.format(wo_grant_host,
-                                                     chars))
-                Log.debug(self, "grant all on slow-query-log.*"
-                          " to anemometer@root_user"
-                          " IDENTIFIED BY password ")
-                WOMysql.execute(
-                    self, 'grant all on slow_query_log.* to'
-                    '\'anemometer\'@\'{0}\' IDENTIFIED'
-                    ' BY \'{1}\''.format(self.app.config.get(
-                        'mysql', 'grant-host'),
-                        chars),
-                    errormsg="cannot grant priviledges",
-                    log=False)
-
-                # Custom Anemometer configuration
-                Log.debug(self, "configration Anemometer")
-                data = dict(host=WOVar.wo_mysql_host, port='3306',
-                            user='anemometer', password=chars)
-                WOTemplate.deploy(self, '{0}22222/htdocs/db/anemometer'
-                                  '/conf/config.inc.php'
-                                  .format(WOVar.wo_webroot),
-                                  'anemometer.mustache', data)
 
         # pt-query-advisor
         if any('/usr/bin/pt-query-advisor' == x[1]
@@ -1643,9 +1334,11 @@ def pre_stack(self):
                 self, '/etc/sysctl.d/60-wo-tweaks.conf',
                 'sysctl.mustache', data, True)
             # use tcp_bbr congestion algorithm only on new kernels
-            if (WOVar.wo_platform_codename == 'bionic' or
-                WOVar.wo_platform_codename == 'disco' or
-                    WOVar.wo_platform_codename == 'buster'):
+            if (WOVar.wo_platform_codename == 'focal' or
+                WOVar.wo_platform_codename == 'buster' or
+                WOVar.wo_platform_codename == 'jammy' or
+                    WOVar.wo_platform_codename == 'bullseye' or
+                    WOVar.wo_platform_codename == 'bookworm'):
                 try:
                     WOShellExec.cmd_exec(
                         self, 'modprobe tcp_bbr')
@@ -1688,6 +1381,7 @@ def pre_stack(self):
         if not os.path.isfile('/opt/wo-kernel.sh'):
             WOTemplate.deploy(self, '/opt/wo-kernel.sh',
                               'wo-kernel-script.mustache', data)
+        WOFileUtils.chmod(self, '/opt/wo-kernel.sh', 0o700)
         if not os.path.isfile('/lib/systemd/system/wo-kernel.service'):
             WOTemplate.deploy(
                 self, '/lib/systemd/system/wo-kernel.service',

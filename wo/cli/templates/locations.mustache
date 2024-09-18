@@ -24,7 +24,7 @@ location ~* \.(?:css(\.map)?|js(\.map)?)$ {
     more_set_headers  "Cache-Control : public, no-transform";
     access_log off;
     log_not_found off;
-    expires 30d;
+    expires 1y;
 }
 # Security settings for better privacy
 # Deny hidden files
@@ -34,6 +34,14 @@ location ~ /\.(?!well-known\/) {
 # letsencrypt validation
 location /.well-known/acme-challenge/ {
    alias /var/www/html/.well-known/acme-challenge/;
+   allow all;
+   auth_basic off;
+}
+# Private Prefetch Proxy
+# https://developer.chrome.com/blog/private-prefetch-proxy/
+location /.well-known/traffic-advice {
+   types { } default_type "application/trafficadvice+json; charset=utf-8";
+   return 200 "[{\n  \"user_agent\": \"prefetch-proxy\",\n  \"google_prefetch_proxy_eap\": {\n    \"fraction\": 1.0\n  }\n}]";
    allow all;
 }
 # Return 403 forbidden for readme.(txt|html) or license.(txt|html) or example.(txt|html) or other common git repository files

@@ -1,13 +1,13 @@
 import csv
 import os
 
-import requests
-
 from wo.core.fileutils import WOFileUtils
 from wo.core.git import WOGit
 from wo.core.logging import Log
 from wo.core.shellexec import WOShellExec, CommandExecutionError
 from wo.core.variables import WOVar
+from wo.core.template import WOTemplate
+from wo.core.checkfqdn import WOFqdn
 
 
 class WOAcme:
@@ -51,11 +51,14 @@ class WOAcme:
         """Export acme.sh csv certificate list"""
         # check acme.sh is installed
         WOAcme.check_acme(self)
-        if not WOShellExec.cmd_exec(
-                self, "{0} ".format(WOAcme.wo_acme_exec) +
-                "--list --listraw > /var/lib/wo/cert.csv"):
+        acme_list = WOShellExec.cmd_exec_stdout(
+            self, "{0} ".format(WOAcme.wo_acme_exec) +
+            "--list --listraw", log=False)
+        if acme_list:
+            WOFileUtils.textwrite(self, '/var/lib/wo/cert.csv', acme_list)
+            WOFileUtils.chmod(self, '/var/lib/wo/cert.csv', 0o600)
+        else:
             Log.error(self, "Unable to export certs list")
-        WOFileUtils.chmod(self, '/var/lib/wo/cert.csv', 0o600)
 
     def setupletsencrypt(self, acme_domains, acmedata):
         """Issue SSL certificates with acme.sh"""
@@ -89,11 +92,11 @@ class WOAcme:
         if not WOShellExec.cmd_exec(
                 self, "{0} ".format(WOAcme.wo_acme_exec) +
                 "--issue -d '{0}' {1} -k {2} -f"
-                .format(all_domains, acme_mode, keylenght)):
+                .format(all_domains, acme_mode, keylenght), log=False):
             Log.failed(self, "Issuing SSL cert with acme.sh")
             if acmedata['dns'] is True:
                 Log.error(
-                    self, "Please make sure your properly "
+                    self, "Please make sure you properly "
                     "set your DNS API credentials for acme.sh\n"
                     "If you are using sudo, use \"sudo -E wo\"")
                 return False
@@ -137,30 +140,21 @@ class WOAcme:
             if os.path.isdir('/var/www/{0}/conf/nginx'
                              .format(wo_domain_name)):
 
-                sslconf = open("/var/www/{0}/conf/nginx/ssl.conf"
-                               .format(wo_domain_name),
-                               encoding='utf-8', mode='w')
-                sslconf.write(
-                    "listen 443 ssl http2;\n"
-                    "listen [::]:443 ssl http2;\n"
-                    "ssl_certificate     {0}/{1}/fullchain.pem;\n"
-                    "ssl_certificate_key     {0}/{1}/key.pem;\n"
-                    "ssl_trusted_certificate {0}/{1}/ca.pem;\n"
-                    "ssl_stapling_verify on;\n"
-                    .format(WOVar.wo_ssl_live, wo_domain_name))
-                sslconf.close()
+                data = dict(ssl_live_path=WOVar.wo_ssl_live,
+                            domain=wo_domain_name, quic=True)
+                WOTemplate.deploy(self,
+                                  '/var/www/{0}/conf/nginx/ssl.conf'
+                                  .format(wo_domain_name),
+                                  'ssl.mustache', data, overwrite=False)
 
             if not WOFileUtils.grep(self, '/var/www/22222/conf/nginx/ssl.conf',
                                     '/etc/letsencrypt'):
                 Log.info(self, "Securing WordOps backend with current cert")
-                sslconf = open("/var/www/22222/conf/nginx/ssl.conf",
-                               encoding='utf-8', mode='w')
-                sslconf.write("ssl_certificate     {0}/{1}/fullchain.pem;\n"
-                              "ssl_certificate_key     {0}/{1}/key.pem;\n"
-                              "ssl_trusted_certificate {0}/{1}/ca.pem;\n"
-                              "ssl_stapling_verify on;\n"
-                              .format(WOVar.wo_ssl_live, wo_domain_name))
-                sslconf.close()
+                data = dict(ssl_live_path=WOVar.wo_ssl_live,
+                            domain=wo_domain_name, quic=False)
+                WOTemplate.deploy(self,
+                                  '/var/www/22222/conf/nginx/ssl.conf',
+                                  'ssl.mustache', data, overwrite=True)
 
             WOGit.add(self, ["/etc/letsencrypt"],
                       msg="Adding letsencrypt folder")
@@ -178,7 +172,7 @@ class WOAcme:
         try:
             WOShellExec.cmd_exec(
                 self, "{0} ".format(WOAcme.wo_acme_exec) +
-                "--renew -d {0} --ecc --force".format(domain))
+                "--renew -d {0} --ecc --force".format(domain), log=False)
         except CommandExecutionError as e:
             Log.debug(self, str(e))
             Log.error(self, 'Unable to renew certificate')
@@ -186,23 +180,11 @@ class WOAcme:
 
     def check_dns(self, acme_domains):
         """Check if a list of domains point to the server IP"""
-        server_ip = requests.get('https://v4.wordops.eu/').text
+        server_ip = WOFqdn.get_server_ip(self)
         for domain in acme_domains:
-            url = (
-                "https://cloudflare-dns.com/dns-query?name={0}&type=A"
-                .format(domain))
-            headers = {
-                'accept': 'application/dns-json'
-            }
-            try:
-                response = requests.get(url, headers=headers).json()
-                domain_ip = response["Answer"][0]['data']
-            except requests.RequestException:
-                Log.error(
-                    self, 'Resolving domain IP failed.\n'
-                    'The domain {0} do not exist or a DNS record is missing'
-                    .format(domain))
-            if(not domain_ip == server_ip):
+            domain_ip = WOFqdn.get_domain_ip(self, domain)
+
+            if (not domain_ip == server_ip):
                 Log.warn(
                     self, "{0}".format(domain) +
                     " point to the IP {0}".format(domain_ip) +
@@ -218,18 +200,26 @@ class WOAcme:
     def cert_check(self, wo_domain_name):
         """Check certificate existance with acme.sh and return Boolean"""
         WOAcme.export_cert(self)
+        # set variable acme_cert
+        acme_cert = False
         # define new csv dialect
         csv.register_dialect('acmeconf', delimiter='|')
         # open file
-        certfile = open('/var/lib/wo/cert.csv', mode='r', encoding='utf-8')
+        certfile = open('/var/lib/wo/cert.csv',
+                        mode='r', encoding='utf-8')
         reader = csv.reader(certfile, 'acmeconf')
         for row in reader:
             # check if domain exist
             if wo_domain_name == row[0]:
                 # check if cert expiration exist
                 if not row[3] == '':
-                    return True
+                    acme_cert = True
         certfile.close()
+        if acme_cert is True:
+            if os.path.exists(
+                '/etc/letsencrypt/live/{0}/fullchain.pem'
+                    .format(wo_domain_name)):
+                return True
         return False
 
     def removeconf(self, domain):
@@ -261,8 +251,7 @@ class WOAcme:
             for dir in acmedir:
                 if os.path.exists('{0}'.format(dir)):
                     WOFileUtils.rm(self, '{0}'.format(dir))
-            # find all broken symlinks
-            WOFileUtils.findBrokenSymlink(self, "/var/www")
+
         else:
             if os.path.islink("{0}".format(sslconf)):
                 WOFileUtils.remove_symlink(self, "{0}".format(sslconf))
@@ -277,4 +266,5 @@ class WOAcme:
                 ssl_conf_file.write("ssl_certificate "
                                     "/var/www/22222/cert/22222.crt;\n"
                                     "ssl_certificate_key "
-                                    "/var/www/22222/cert/22222.key;\n")
+                                    "/var/www/22222/cert/22222.key;\n"
+                                    "ssl_stapling off;\n")

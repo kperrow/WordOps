@@ -21,22 +21,21 @@ class WODownload():
                 directory = os.path.dirname(filename)
                 if not os.path.exists(directory):
                     os.makedirs(directory)
-                Log.info(self, "Downloading {0:20}".format(pkg_name), end=' ')
+                Log.wait(self, "Downloading {0:20}".format(pkg_name))
                 with open(filename, "wb") as out_file:
                     req = requests.get(url, timeout=(5, 30))
                     if req.encoding is None:
                         req.encoding = 'utf-8'
                     out_file.write(req.content)
-                Log.info(self, "{0}".format("[" + Log.ENDC + "Done" +
-                                            Log.OKBLUE + "]"))
+                Log.valide(self, "Downloading {0:20}".format(pkg_name))
             except requests.RequestException as e:
                 Log.debug(self, "[{err}]".format(err=str(e.reason)))
                 Log.error(self, "Unable to download file, {0}"
-                          .format(filename))
+                          .format(filename), exit=False)
                 return False
         return 0
 
-    def latest_release(self, repository):
+    def latest_release(self, repository, name=False):
         """Get the latest release number of a GitHub repository.\n
         repository format should be: \"user/repo\""""
         try:
@@ -48,5 +47,19 @@ class WODownload():
         except requests.RequestException as e:
             Log.debug(self, str(e))
             Log.error(self, "Unable to query GitHub API")
+        if name:
+            return github_json["name"]
+        else:
+            return github_json["tag_name"]
 
-        return github_json["tag_name"]
+    def pma_release(self):
+        """Get the latest phpmyadmin release number from a json file"""
+        try:
+            req = requests.get(
+                'https://www.phpmyadmin.net/home_page/version.json',
+                timeout=(5, 30))
+            pma_json = req.json()
+        except requests.RequestException as e:
+            Log.debug(self, str(e))
+            Log.error(self, "Unable to query phpmyadmin API")
+        return pma_json["version"]

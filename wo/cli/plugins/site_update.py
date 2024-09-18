@@ -4,7 +4,13 @@ import os
 
 from cement.core.controller import CementBaseController, expose
 
-from wo.cli.plugins.site_functions import *
+from wo.cli.plugins.site_functions import (
+    detSitePar, site_package_check,
+    pre_run_checks, setupdomain, SiteError,
+    setupdatabase, setupwordpress, setwebrootpermissions,
+    display_cache_settings, copyWildcardCert,
+    updatewpuserpassword, setupngxblocker, setupwp_plugin,
+    setupwordpressnetwork, installwp_plugin, sitebackup, uninstallwp_plugin)
 from wo.cli.plugins.sitedb import (getAllsites,
                                    getSiteInfo, updateSiteInfo)
 from wo.core.acme import WOAcme
@@ -35,12 +41,6 @@ class WOSiteUpdateController(CementBaseController):
                 dict(help="update to html site", action='store_true')),
             (['--php'],
              dict(help="update to php site", action='store_true')),
-            (['--php72'],
-                dict(help="update to php72 site", action='store_true')),
-            (['--php73'],
-                dict(help="update to php73 site", action='store_true')),
-            (['--php74'],
-                dict(help="update to php74 site", action='store_true')),
             (['--mysql'],
                 dict(help="update to mysql site", action='store_true')),
             (['--wp'],
@@ -61,6 +61,12 @@ class WOSiteUpdateController(CementBaseController):
                      action='store_true')),
             (['--wpredis'],
                 dict(help="update to redis cache", action='store_true')),
+            (['--alias'],
+                dict(help="domain name to redirect to",
+                     action='store', nargs='?')),
+            (['--subsiteof'],
+                dict(help="create a subsite of a multisite install",
+                     action='store', nargs='?')),
             (['-le', '--letsencrypt'],
                 dict(help="configure letsencrypt ssl for the site",
                      action='store' or 'store_const',
@@ -92,6 +98,10 @@ class WOSiteUpdateController(CementBaseController):
             (['--all'],
                 dict(help="update all sites", action='store_true')),
         ]
+        for php_version, php_number in WOVar.wo_php_versions.items():
+            arguments.append(([f'--{php_version}'],
+                              dict(help=f'Update site to PHP {php_number}',
+                                   action='store_true')))
 
     @expose(help="Update site type or cache")
     def default(self):
@@ -104,18 +114,8 @@ class WOSiteUpdateController(CementBaseController):
             if pargs.html:
                 Log.error(self, "No site can be updated to html")
 
-            if not (pargs.php or pargs.php72 or pargs.php73 or pargs.php74 or
-                    pargs.mysql or pargs.wp or pargs.wpsubdir or
-                    pargs.wpsubdomain or pargs.wpfc or pargs.wpsc or
-                    pargs.wprocket or pargs.wpce or
-                    pargs.wpredis or pargs.letsencrypt or pargs.hsts or
-                    pargs.dns or pargs.force):
+            if all(value is None or value is False for value in vars(pargs).values()):
                 Log.error(self, "Please provide options to update sites.")
-
-        if pargs.all:
-            if pargs.site_name:
-                Log.error(self, "`--all` option cannot be used with site name"
-                          " provided")
 
             sites = getAllsites(self)
             if not sites:
@@ -134,9 +134,8 @@ class WOSiteUpdateController(CementBaseController):
     def doupdatesite(self, pargs):
         pargs = self.app.pargs
         letsencrypt = False
-        php73 = False
-        php74 = False
-        php72 = False
+        for pargs_version in WOVar.wo_php_versions:
+            globals()[pargs_version] = False
 
         data = dict()
         try:
@@ -154,10 +153,23 @@ class WOSiteUpdateController(CementBaseController):
             proxyinfo = proxyinfo.split(':')
             host = proxyinfo[0].strip()
             port = '80' if len(proxyinfo) < 2 else proxyinfo[1].strip()
-        elif stype is None and not (pargs.proxy or pargs.letsencrypt):
+        elif stype is None and pargs.alias:
+            stype, cache = 'alias', ''
+            alias_name = pargs.alias.strip()
+            if not alias_name:
+                Log.error(self, "Please provide alias name")
+        elif stype is None and pargs.subsiteof:
+            stype, cache = 'subsite', ''
+            subsiteof_name = pargs.subsiteof.strip()
+            if not subsiteof_name:
+                Log.error(self, "Please provide multisite parent name")
+        elif stype is None and not (pargs.proxy or
+                                    pargs.letsencrypt or
+                                    pargs.alias or
+                                    pargs.subsiteof):
             stype, cache = 'html', 'basic'
-        elif stype and pargs.proxy:
-            Log.error(self, "--proxy can not be used with other site types")
+        elif stype and (pargs.proxy or pargs.alias or pargs.subsiteof):
+            Log.error(self, "--proxy/alias/subsiteof can not be used with other site types")
 
         if not pargs.site_name:
             try:
@@ -182,15 +194,11 @@ class WOSiteUpdateController(CementBaseController):
             check_ssl = check_site.is_ssl
             check_php_version = check_site.php_version
 
-            old_php72 = bool(check_php_version == "7.2")
-            old_php73 = bool(check_php_version == "7.3")
-            old_php74 = bool(check_php_version == "7.4")
-
         if ((pargs.password or pargs.hsts or
              pargs.ngxblocker or pargs.letsencrypt == 'renew') and not (
-            pargs.html or pargs.php or pargs.php72 or pargs.php73 or
-            pargs.php74 or
-            pargs.mysql or pargs.wp or pargs.wpfc or pargs.wpsc or
+            pargs.html or pargs.php or pargs.php74 or pargs.php80 or
+            pargs.php81 or pargs.php82 or
+            pargs.php83 or pargs.mysql or pargs.wp or pargs.wpfc or pargs.wpsc or
             pargs.wprocket or pargs.wpce or
                 pargs.wpsubdir or pargs.wpsubdomain)):
 
@@ -214,9 +222,9 @@ class WOSiteUpdateController(CementBaseController):
                     Log.error(
                         self, "service nginx reload failed. "
                         "check issues with `nginx -t` command")
-                return 0
-
-            # setup ngxblocker
+                else:
+                    return 0
+                    # setup ngxblocker
             if (pargs.ngxblocker):
                 if pargs.ngxblocker == "on":
                     if os.path.isdir('/etc/nginx/bots.d'):
@@ -238,7 +246,8 @@ class WOSiteUpdateController(CementBaseController):
                 if not WOService.reload_service(self, 'nginx'):
                     Log.error(self, "service nginx reload failed. "
                               "check issues with `nginx -t` command")
-                return 0
+                else:
+                    return 0
 
             # letsencryot rebew
             if (pargs.letsencrypt == 'renew'):
@@ -258,17 +267,20 @@ class WOSiteUpdateController(CementBaseController):
                 return 0
 
         if (((stype == 'php' and
-              oldsitetype not in ['html', 'proxy', 'php', 'php72',
-                                  'php73', 'php74']) or
+              oldsitetype not in ['html', 'proxy', 'php', 'php74', 'php80',
+                                  'php81', 'php82', 'php83']) or
              (stype == 'mysql' and oldsitetype not in [
-                 'html', 'php', 'php72', 'php73', 'php74', 'proxy']) or
+                 'html', 'php', 'php74', 'php80', 'php81',
+                 'php82', 'php83', 'proxy']) or
              (stype == 'wp' and oldsitetype not in [
-                 'html', 'php', 'php72', 'php73', 'php74', 'mysql',
-                 'proxy', 'wp']) or
+                 'html', 'php', 'php74', 'php80', 'php81',
+                 'php82', 'php83', 'mysql', 'proxy', 'wp']) or
              (stype == 'wpsubdir' and oldsitetype in ['wpsubdomain']) or
              (stype == 'wpsubdomain' and oldsitetype in ['wpsubdir']) or
              (stype == oldsitetype and cache == oldcachetype)) and
-                not (pargs.php72 or pargs.php73 or pargs.php74)):
+                not (pargs.php74 or pargs.php80 or
+                     pargs.php81 or pargs.php82 or
+                     pargs.php83 or pargs.alias)):
             Log.info(self, Log.FAIL + "can not update {0} {1} to {2} {3}".
                      format(oldsitetype, oldcachetype, stype, cache))
             return 1
@@ -283,11 +295,49 @@ class WOSiteUpdateController(CementBaseController):
             data['currsitetype'] = oldsitetype
             data['currcachetype'] = oldcachetype
 
+        if stype == 'alias':
+            data['site_name'] = wo_domain
+            data['www_domain'] = wo_www_domain
+            data['webroot'] = wo_site_webroot
+            data['currsitetype'] = oldsitetype
+            data['currcachetype'] = oldcachetype
+            data['alias'] = True
+            data['alias_name'] = alias_name
+
+        if stype == 'subsite':
+            # Get parent site data
+            parent_site_info = getSiteInfo(self, subsiteof_name)
+            if not parent_site_info:
+                Log.error(self, "Parent site {0} does not exist"
+                          .format(subsiteof_name))
+            if not parent_site_info.is_enabled:
+                Log.error(self, "Parent site {0} is not enabled"
+                          .format(subsiteof_name))
+            if parent_site_info.site_type not in ['wpsubdomain', 'wpsubdir']:
+                Log.error(self, "Parent site {0} is not WordPress multisite"
+                          .format(subsiteof_name))
+
+            data = dict(
+                site_name=wo_domain, www_domain=wo_www_domain,
+                static=False, basic=False, multisite=False, webroot=wo_site_webroot)
+
+            data["wp"] = parent_site_info.site_type == 'wp'
+            data["wpfc"] = parent_site_info.cache_type == 'wpfc'
+            data["wpsc"] = parent_site_info.cache_type == 'wpsc'
+            data["wprocket"] = parent_site_info.cache_type == 'wprocket'
+            data["wpce"] = parent_site_info.cache_type == 'wpce'
+            data["wpredis"] = parent_site_info.cache_type == 'wpredis'
+            data["wpsubdir"] = parent_site_info.site_type == 'wpsubdir'
+            data["wo_php"] = ("php" + parent_site_info.php_version).replace(".", "")
+            data['subsite'] = True
+            data['subsiteof_name'] = subsiteof_name
+            data['subsiteof_webroot'] = parent_site_info.site_path
+
         if stype == 'php':
             data = dict(
                 site_name=wo_domain, www_domain=wo_www_domain,
                 static=False, basic=True, wp=False, wpfc=False,
-                php72=False, php73=False, php74=False,
+                php74=False, php80=False, php81=False, php82=False, php83=False,
                 wpsc=False, wpredis=False, wprocket=False, wpce=False,
                 multisite=False, wpsubdir=False, webroot=wo_site_webroot,
                 currsitetype=oldsitetype, currcachetype=oldcachetype)
@@ -311,10 +361,12 @@ class WOSiteUpdateController(CementBaseController):
                 if stype == 'wpsubdir':
                     data['wpsubdir'] = True
 
-        if ((pargs.php72 or pargs.php73 or
-             pargs.php74) and (not data)):
+        if ((pargs.php74 or pargs.php80 or pargs.php81 or
+             pargs.php82 or pargs.php83) and
+                (not data)):
             Log.debug(
-                self, "pargs php72, or php73, or php74 enabled")
+                self, "pargs php74, "
+                "or php80, or php81 or php82 or php83 enabled")
             data = dict(
                 site_name=wo_domain,
                 www_domain=wo_www_domain,
@@ -323,13 +375,15 @@ class WOSiteUpdateController(CementBaseController):
                 webroot=wo_site_webroot)
             stype = oldsitetype
             cache = oldcachetype
-            if oldsitetype == 'html' or oldsitetype == 'proxy':
+            if oldsitetype == 'html' or oldsitetype == 'proxy' or oldsitetype == 'alias':
                 data['static'] = False
                 data['wp'] = False
                 data['multisite'] = False
                 data['wpsubdir'] = False
             elif (oldsitetype == 'php' or oldsitetype == 'mysql' or
-                  oldsitetype == 'php73'or oldsitetype == 'php74'):
+                  oldsitetype == 'php73' or oldsitetype == 'php74' or
+                  oldsitetype == 'php80' or oldsitetype == 'php81' or
+                  oldsitetype == 'php82' or oldsitetype == 'php83'):
                 data['static'] = False
                 data['wp'] = False
                 data['multisite'] = False
@@ -350,91 +404,42 @@ class WOSiteUpdateController(CementBaseController):
                 data['multisite'] = True
                 data['wpsubdir'] = False
 
-            if oldcachetype == 'basic':
-                data['basic'] = True
-                data['wpfc'] = False
-                data['wpsc'] = False
-                data['wpredis'] = False
-                data['wprocket'] = False
-                data['wpce'] = False
-            elif oldcachetype == 'wpfc':
-                data['basic'] = False
-                data['wpfc'] = True
-                data['wpsc'] = False
-                data['wpredis'] = False
-                data['wprocket'] = False
-                data['wpce'] = False
-            elif oldcachetype == 'wpsc':
-                data['basic'] = False
-                data['wpfc'] = False
-                data['wpsc'] = True
-                data['wpredis'] = False
-                data['wprocket'] = False
-                data['wpce'] = False
-            elif oldcachetype == 'wpredis':
-                data['basic'] = False
-                data['wpfc'] = False
-                data['wpsc'] = False
-                data['wpredis'] = True
-                data['wprocket'] = False
-                data['wpce'] = False
-            elif oldcachetype == 'wprocket':
-                data['basic'] = False
-                data['wpfc'] = False
-                data['wpsc'] = False
-                data['wpredis'] = False
-                data['wprocket'] = True
-                data['wpce'] = False
-            elif oldcachetype == 'wpce':
-                data['basic'] = False
-                data['wpfc'] = False
-                data['wpsc'] = False
-                data['wpredis'] = False
-                data['wprocket'] = False
-                data['wpce'] = True
+            # Set all variables to false
+            data['basic'] = False
+            data['wpfc'] = False
+            data['wpsc'] = False
+            data['wpredis'] = False
+            data['wprocket'] = False
+            data['wpce'] = False
 
-        if pargs.php72:
-            Log.debug(self, "pargs.php72 detected")
-            data['php72'] = True
-            php72 = True
-        elif pargs.php73:
-            Log.debug(self, "pargs.php73 detected")
-            data['php73'] = True
-            php73 = True
-        elif pargs.php74:
-            Log.debug(self, "pargs.php74 detected")
-            data['php74'] = True
-            php74 = True
+            # set the data if oldcachetype is True
+            if oldcachetype in data:
+                data[oldcachetype] = True
 
-        if pargs.php72:
-            if php72 is old_php72:
-                Log.info(self, "PHP 7.2 is already enabled for given "
-                         "site")
-                pargs.php72 = False
+        for pargs_version in WOVar.wo_php_versions:
+            if getattr(pargs, pargs_version):
+                Log.debug(self, f"pargs.{pargs_version} detected")
+                data[pargs_version] = True
+                globals()[pargs_version] = True
+                break
 
-        if pargs.php73:
-            if php73 is old_php73:
-                Log.info(self, "PHP 7.3 is already enabled for given "
-                         "site")
-                pargs.php73 = False
+        for pargs_version, version in WOVar.wo_php_versions.items():
+            old_version_var = bool(check_php_version == version)
+            Log.debug(self, f"old_version_var for {version} = {old_version_var}")
 
-        if pargs.php74:
-            if php74 is old_php74:
-                Log.info(self, "PHP 7.4 is already enabled for given "
-                         "site")
-                pargs.php74 = False
+            if getattr(pargs, pargs_version):
+                if globals()[pargs_version] is old_version_var:
+                    Log.info(
+                        self, f"PHP {version} is already enabled for given site")
+                    setattr(pargs, pargs_version, False)
 
-        if (data and (not pargs.php73) and
-                (not pargs.php74) and (not pargs.php72)):
-            data['php72'] = bool(old_php72 is True)
-            Log.debug(self, "data php72 = {0}".format(data['php72']))
-            php72 = bool(old_php72 is True)
-            data['php73'] = bool(old_php73 is True)
-            Log.debug(self, "data php73 = {0}".format(data['php73']))
-            php73 = bool(old_php73 is True)
-            data['php74'] = bool(old_php74 is True)
-            Log.debug(self, "data php74 = {0}".format(data['php74']))
-            php74 = bool(old_php74 is True)
+            if (data and (not pargs.php74) and
+                    (not pargs.php80) and (not pargs.php81) and (not pargs.php82)
+                    and (not pargs.php83)):
+                data[pargs_version] = bool(old_version_var is True)
+                Log.debug(
+                    self, f"data {pargs_version} = {data[pargs_version]}")
+                globals()[pargs_version] = bool(old_version_var is True)
 
         if pargs.letsencrypt:
             acme_domains = []
@@ -511,30 +516,24 @@ class WOSiteUpdateController(CementBaseController):
             data['basic'] = False
             cache = 'wpce'
 
-        if ((php73 is old_php73) and (php72 is old_php72) and
-            (php74 is old_php74) and (stype == oldsitetype and
-                                      cache == oldcachetype)):
+        # Vérification si rien n'a changé
+        if all(globals()[version_key] is bool(check_php_version == version) for version_key,
+               version in WOVar.wo_php_versions.items()) and (stype == oldsitetype
+                                                              and cache == oldcachetype
+                                                              and stype != 'alias'
+                                                              and stype != 'proxy'
+                                                              and stype != 'subsite'):
             Log.debug(self, "Nothing to update")
             return 1
 
-        if php73 is True:
-            data['wo_php'] = 'php73'
-            check_php_version = '7.3'
-        elif php74 is True:
-            data['wo_php'] = 'php74'
-            check_php_version = '7.4'
-        elif php72 is True:
-            data['wo_php'] = 'php72'
-            check_php_version = '7.2'
-        else:
-            data['wo_php'] = 'php72'
-            check_php_version = '7.2'
-
-        if pargs.hsts:
-            data['hsts'] = bool(pargs.hsts == "on")
-
-        if pargs.ngxblocker:
-            ngxblocker = bool(pargs.ngxblocker == 'on')
+        # Mise à jour de la version PHP
+        for pargs_version, version in WOVar.wo_php_versions.items():
+            if globals()[pargs_version] is True:
+                data['wo_php'] = pargs_version
+                Log.debug(self, f"data wo_php set to {pargs_version}")
+                check_php_version = version
+                Log.debug(self, f"check_php_versions set to {version}")
+                break
 
         if not data:
             Log.error(self, "Cannot update {0}, Invalid Options"
@@ -557,9 +556,6 @@ class WOSiteUpdateController(CementBaseController):
                 sitebackup(self, data)
             except Exception as e:
                 Log.debug(self, str(e))
-                Log.info(self, Log.FAIL + "Check the log for details: "
-                         "`tail /var/log/wo/wordops.log` and please try again")
-                return 1
 
             # setup NGINX configuration, and webroot
             try:
@@ -572,6 +568,20 @@ class WOSiteUpdateController(CementBaseController):
                 return 1
 
         if 'proxy' in data.keys() and data['proxy']:
+            updateSiteInfo(self, wo_domain, stype=stype, cache=cache,
+                           ssl=(bool(check_site.is_ssl)))
+            Log.info(self, "Successfully updated site"
+                     " http://{0}".format(wo_domain))
+            return 0
+
+        if 'alias_name' in data.keys() and data['alias']:
+            updateSiteInfo(self, wo_domain, stype=stype, cache=cache,
+                           ssl=(bool(check_site.is_ssl)))
+            Log.info(self, "Successfully updated site"
+                     " http://{0}".format(wo_domain))
+            return 0
+
+        if 'subsite' in data.keys() and data['subsite']:
             updateSiteInfo(self, wo_domain, stype=stype, cache=cache,
                            ssl=(bool(check_site.is_ssl)))
             Log.info(self, "Successfully updated site"
@@ -608,8 +618,9 @@ class WOSiteUpdateController(CementBaseController):
                         'www.{0}'.format(wo_domain)]
 
                 if WOAcme.cert_check(self, wo_domain):
-                    SSL.archivedcertificatehandle(
-                        self, wo_domain, acme_domains)
+                    if SSL.archivedcertificatehandle(
+                            self, wo_domain, acme_domains):
+                        letsencrypt = True
                 else:
                     if acme_subdomain:
                         Log.debug(self, "checkWildcardExist on *.{0}"
@@ -670,6 +681,7 @@ class WOSiteUpdateController(CementBaseController):
                               "check issues with `nginx -t` command")
                 Log.info(self, "Congratulations! Successfully "
                          "Configured SSL on https://{0}".format(wo_domain))
+                letsencrypt = True
                 if (SSL.getexpirationdays(self, wo_domain) > 0):
                     Log.info(self, "Your cert will expire within " +
                              str(SSL.getexpirationdays(self, wo_domain)) +
@@ -703,15 +715,20 @@ class WOSiteUpdateController(CementBaseController):
                                                'hsts.conf.disabled'
                                                .format(wo_site_webroot))
                         # find all broken symlinks
-                        sympath = "/var/www"
+                        sympath = (f'{wo_site_webroot}/conf')
                         WOFileUtils.findBrokenSymlink(self, sympath)
 
                 elif (pargs.letsencrypt == "clean" or
                       pargs.letsencrypt == "purge"):
                     WOAcme.removeconf(self, wo_domain)
                     # find all broken symlinks
-                    sympath = "/var/www"
-                    WOFileUtils.findBrokenSymlink(self, sympath)
+                    allsites = getAllsites(self)
+                    for site in allsites:
+                        if not site:
+                            pass
+                        sympath = "{0}/conf".format(site.site_path)
+                        WOFileUtils.findBrokenSymlink(self, sympath)
+
                 if not WOService.reload_service(self, 'nginx'):
                     Log.error(self, "service nginx reload failed. "
                               "check issues with `nginx -t` command")
@@ -719,8 +736,9 @@ class WOSiteUpdateController(CementBaseController):
                     # auto-renewal") WOCron.remove_cron(self,'wo site
                     # update {0} --le=renew --min_expiry_limit 30
                     # 2> \/dev\/null'.format(wo_domain))
-                    Log.info(self, "Successfully Disabled SSl for Site "
-                             " http://{0}".format(wo_domain))
+                Log.info(self, "Successfully Disabled SSl for Site "
+                         " http://{0}".format(wo_domain))
+                letsencrypt = False
 
             # Add nginx conf folder into GIT
             WOGit.add(self, ["{0}/conf/nginx".format(wo_site_webroot)],
@@ -728,53 +746,6 @@ class WOSiteUpdateController(CementBaseController):
                       .format(wo_domain))
             updateSiteInfo(self, wo_domain, ssl=letsencrypt)
             return 0
-
-        if pargs.hsts:
-            if data['hsts'] is True:
-                if os.path.isfile(("{0}/conf/nginx/ssl.conf")
-                                  .format(wo_site_webroot)):
-                    if not os.path.isfile("{0}/conf/nginx/hsts.conf"
-                                          .format(wo_site_webroot)):
-                        SSL.setuphsts(self, wo_domain)
-                    else:
-                        Log.error(self, "HSTS is already configured for given "
-                                        "site")
-                    if not WOService.reload_service(self, 'nginx'):
-                        Log.error(self, "service nginx reload failed. "
-                                  "check issues with `nginx -t` command")
-                else:
-                    Log.error(self, "HTTPS is not configured for given "
-                              "site")
-
-            elif data['hsts'] is False:
-                if os.path.isfile(("{0}/conf/nginx/hsts.conf")
-                                  .format(wo_site_webroot)):
-                    WOFileUtils.mvfile(self, "{0}/conf/nginx/hsts.conf"
-                                       .format(wo_site_webroot),
-                                       '{0}/conf/nginx/hsts.conf.disabled'
-                                       .format(wo_site_webroot))
-                    if not WOService.reload_service(self, 'nginx'):
-                        Log.error(self, "service nginx reload failed. "
-                                  "check issues with `nginx -t` command")
-                else:
-                    Log.error(self, "HSTS is not configured for given "
-                              "site")
-        if pargs.ngxblocker:
-            if ngxblocker is True:
-                setupngxblocker(self, wo_domain)
-            elif ngxblocker is False:
-                if os.path.isfile("{0}/conf/nginx/ngxblocker.conf"
-                                  .format(wo_site_webroot)):
-                    WOFileUtils.mvfile(
-                        self,
-                        "{0}/conf/nginx/ngxblocker.conf"
-                        .format(wo_site_webroot),
-                        "{0}/conf/nginx/ngxblocker.conf.disabled"
-                        .format(wo_site_webroot))
-            # Service Nginx Reload
-            if not WOService.reload_service(self, 'nginx'):
-                Log.error(self, "service nginx reload failed. "
-                          "check issues with `nginx -t` command")
 
         if stype == oldsitetype and cache == oldcachetype:
 
@@ -823,7 +794,8 @@ class WOSiteUpdateController(CementBaseController):
 
         # Setup WordPress if old sites are html/php/mysql sites
         if data['wp'] and oldsitetype in ['html', 'proxy', 'php', 'php72',
-                                          'mysql', 'php73', 'php74']:
+                                          'mysql', 'php73', 'php74', 'php80',
+                                          'php81', 'php82', 'php83']:
             try:
                 wo_wp_creds = setupwordpress(self, data)
             except SiteError as e:

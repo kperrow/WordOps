@@ -11,6 +11,8 @@ from wo.core.fileutils import WOFileUtils
 from wo.core.logging import Log
 from wo.core.shellexec import WOShellExec
 from wo.core.variables import WOVar
+from wo.core.services import WOService
+from wo.core.mysql import WOMysql
 
 
 class WOStackUpgradeController(CementBaseController):
@@ -31,15 +33,12 @@ class WOStackUpgradeController(CementBaseController):
             (['--nginx'],
                 dict(help='Upgrade Nginx stack', action='store_true')),
             (['--php'],
-                dict(help='Upgrade PHP 7.2 stack', action='store_true')),
-            (['--php72'],
-                dict(help='Upgrade PHP 7.2 stack', action='store_true')),
-            (['--php73'],
-             dict(help='Upgrade PHP 7.3 stack', action='store_true')),
-            (['--php74'],
-             dict(help='Upgrade PHP 7.4 stack', action='store_true')),
+                dict(help='Upgrade PHP stack', action='store_true')),
             (['--mysql'],
                 dict(help='Upgrade MySQL stack', action='store_true')),
+            (['--mariadb'],
+                dict(help='Upgrade MySQL stack alias',
+                     action='store_true')),
             (['--wpcli'],
                 dict(help='Upgrade WPCLI', action='store_true')),
             (['--redis'],
@@ -67,6 +66,10 @@ class WOStackUpgradeController(CementBaseController):
                 dict(help="Force Packages upgrade without any prompt",
                      action='store_true')),
         ]
+        for php_version, php_number in WOVar.wo_php_versions.items():
+            arguments.append(([f'--{php_version}'],
+                              dict(help=f'Upgrade PHP {php_number} stack',
+                                   action='store_true')))
 
     @expose(hide=True)
     def default(self, disp_msg=False):
@@ -75,18 +78,21 @@ class WOStackUpgradeController(CementBaseController):
         packages = []
         self.msg = []
         pargs = self.app.pargs
-        if not (pargs.web or pargs.nginx or pargs.php or
-                pargs.php72 or pargs.php73 or pargs.php74 or pargs.mysql or
-                pargs.ngxblocker or pargs.all or pargs.netdata or
-                pargs.wpcli or pargs.composer or pargs.phpmyadmin or
-                pargs.adminer or pargs.dashboard or pargs.mysqltuner or
-                pargs.redis or pargs.fail2ban or pargs.security):
+        wo_phpmyadmin = WODownload.pma_release(self)
+        if all(value is None or value is False for value in vars(pargs).values()):
             pargs.web = True
             pargs.admin = True
             pargs.security = True
 
+        if pargs.mariadb:
+            pargs.mysql = True
+
         if pargs.php:
-            pargs.php72 = True
+            if self.app.config.has_section('php'):
+                config_php_ver = self.app.config.get(
+                    'php', 'version')
+                current_php = config_php_ver.replace(".", "")
+                setattr(self.app.pargs, 'php{0}'.format(current_php), True)
 
         if pargs.all:
             pargs.web = True
@@ -96,9 +102,11 @@ class WOStackUpgradeController(CementBaseController):
 
         if pargs.web:
             pargs.nginx = True
-            pargs.php72 = True
-            pargs.php73 = True
             pargs.php74 = True
+            pargs.php80 = True
+            pargs.php81 = True
+            pargs.php82 = True
+            pargs.php83 = True
             pargs.mysql = True
             pargs.wpcli = True
 
@@ -126,27 +134,26 @@ class WOStackUpgradeController(CementBaseController):
                 else:
                     Log.info(self, "Nginx Stable is not already installed")
 
-        # php 7.2
-        if pargs.php72:
-            if WOAptGet.is_installed(self, 'php7.2-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php72 + \
-                    WOVar.wo_php_extra
+        wo_vars = {
+            'php74': WOVar.wo_php74,
+            'php80': WOVar.wo_php80,
+            'php81': WOVar.wo_php81,
+            'php82': WOVar.wo_php82,
+            'php83': WOVar.wo_php83,
+        }
 
-        # php 7.3
-        if pargs.php73:
-            if WOAptGet.is_installed(self, 'php7.3-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php73 + \
-                    WOVar.wo_php_extra
-
-        # php 7.4
-        if pargs.php74:
-            if WOAptGet.is_installed(self, 'php7.4-fpm'):
-                apt_packages = apt_packages + WOVar.wo_php74 + \
-                    WOVar.wo_php_extra
+        for parg_version, version in WOVar.wo_php_versions.items():
+            if getattr(pargs, parg_version, False):
+                Log.debug(self, f"Setting apt_packages variable for PHP {version}")
+                if WOAptGet.is_installed(self, f'php{version}-fpm'):
+                    apt_packages = apt_packages + wo_vars[parg_version] + WOVar.wo_php_extra
+                else:
+                    Log.debug(self, f"PHP {version} not installed")
+                    Log.info(self, f"PHP {version} not installed")
 
         # mysql
         if pargs.mysql:
-            if WOShellExec.cmd_exec(self, 'mysqladmin ping'):
+            if WOMysql.mariadb_ping(self):
                 apt_packages = apt_packages + ['mariadb-server']
 
         # redis
@@ -162,26 +169,19 @@ class WOStackUpgradeController(CementBaseController):
         # wp-cli
         if pargs.wpcli:
             if os.path.isfile('/usr/local/bin/wp'):
-                packages = packages + [[
-                    "https://github.com/wp-cli/wp-cli/"
-                    "releases/download/v{0}/"
-                    "wp-cli-{0}.phar".format(WOVar.wo_wp_cli),
-                    "/usr/local/bin/wp",
-                    "WP-CLI"]]
+                packages = packages + [[f"{WOVar.wpcli_url}",
+                                        "/usr/local/bin/wp",
+                                        "WP-CLI"]]
             else:
                 Log.info(self, "WPCLI is not installed with WordOps")
 
         # netdata
         if pargs.netdata:
             # detect static binaries install
-            if os.path.isdir('/opt/netdata'):
+            if (os.path.isdir('/opt/netdata') or
+                    os.path.isdir('/etc/netdata')):
                 packages = packages + [[
-                    'https://my-netdata.io/kickstart-static64.sh',
-                    '/var/lib/wo/tmp/kickstart.sh', 'Netdata']]
-            # detect install from source
-            elif os.path.isdir('/etc/netdata'):
-                packages = packages + [[
-                    'https://my-netdata.io/kickstart.sh',
+                    f"{WOVar.netdata_script_url}",
                     '/var/lib/wo/tmp/kickstart.sh', 'Netdata']]
             else:
                 Log.info(self, 'Netdata is not installed')
@@ -206,7 +206,7 @@ class WOStackUpgradeController(CementBaseController):
                     "https://files.phpmyadmin.net"
                     "/phpMyAdmin/{0}/phpMyAdmin-{0}-"
                     "all-languages.tar.gz"
-                    .format(WOVar.wo_phpmyadmin),
+                    .format(wo_phpmyadmin),
                     "/var/lib/wo/tmp/pma.tar.gz",
                     "PHPMyAdmin"]]
             else:
@@ -219,10 +219,7 @@ class WOStackUpgradeController(CementBaseController):
                               .format(WOVar.wo_webroot)):
                 Log.debug(self, "Setting packages variable for Adminer ")
                 packages = packages + [[
-                    "https://github.com/vrana/adminer/"
-                    "releases/download/v{0}"
-                    "/adminer-{0}.php"
-                    .format(WOVar.wo_adminer),
+                    "https://www.adminer.org/latest.php",
                     "{0}22222/"
                     "htdocs/db/adminer/index.php"
                     .format(WOVar.wo_webroot),
@@ -270,14 +267,18 @@ class WOStackUpgradeController(CementBaseController):
                     'ngxblocker'
                 ]]
 
-        if ((not (apt_packages)) and (not(packages))):
+        if not apt_packages and not packages:
             self.app.args.print_help()
         else:
             pre_stack(self)
-            if (apt_packages):
+            if apt_packages:
                 if not ("php7.2-fpm" in apt_packages or
                         "php7.3-fpm" in apt_packages or
                         "php7.4-fpm" in apt_packages or
+                        "php8.0-fpm" in apt_packages or
+                        "php8.1-fpm" in apt_packages or
+                        "php8.2-fpm" in apt_packages or
+                        "php8.3-fpm" in apt_packages or
                         "redis-server" in apt_packages or
                         "nginx-custom" in apt_packages or
                         "mariadb-server" in apt_packages):
@@ -291,37 +292,29 @@ class WOStackUpgradeController(CementBaseController):
                     start_upgrade = input("Do you want to continue:[y/N]")
                     if start_upgrade != "Y" and start_upgrade != "y":
                         Log.error(self, "Not starting package update")
+                # additional pre_pref
+                if "nginx-custom" in apt_packages:
+                    pre_pref(self, WOVar.wo_nginx)
                 Log.wait(self, "Updating APT cache")
                 # apt-get update
                 WOAptGet.update(self)
                 Log.valide(self, "Updating APT cache")
 
-                # additional pre_pref
-                if "nginx-custom" in apt_packages:
-                    pre_pref(self, WOVar.wo_nginx)
-                if "php7.2-fpm" in apt_packages:
-                    WOAptGet.remove(self, ['php7.2-fpm'],
-                                    auto=False, purge=True)
-                if "php7.3-fpm" in apt_packages:
-                    WOAptGet.remove(self, ['php7.3-fpm'],
-                                    auto=False, purge=True)
-                if "php7.4-fpm" in apt_packages:
-                    WOAptGet.remove(self, ['php7.4-fpm'],
-                                    auto=False, purge=True)
                 # check if nginx upgrade is blocked
                 if os.path.isfile(
                         '/etc/apt/preferences.d/nginx-block'):
                     post_pref(self, WOVar.wo_nginx, [], True)
+                # redis pre_pref
+                if "redis-server" in apt_packages:
+                    pre_pref(self, WOVar.wo_redis)
                 # upgrade packages
                 WOAptGet.install(self, apt_packages)
                 Log.wait(self, "Configuring APT Packages")
                 post_pref(self, apt_packages, [], True)
-                if "mariadb-server" in apt_packages:
-                    WOShellExec.cmd_exec(self, 'mysql_upgrade')
                 Log.valide(self, "Configuring APT Packages")
                 # Post Actions after package updates
 
-            if (packages):
+            if packages:
                 if WOAptGet.is_selected(self, 'WP-CLI', packages):
                     WOFileUtils.rm(self, '/usr/local/bin/wp')
 
@@ -360,29 +353,20 @@ class WOStackUpgradeController(CementBaseController):
 
                 # Netdata
                 if WOAptGet.is_selected(self, 'Netdata', packages):
+                    WOService.stop_service(self, 'netdata')
+                    if os.path.exists('/opt/netdata/usr/libexec/netdata/netdata-uninstaller.sh'):
+                        WOShellExec.cmd_exec(self,
+                                             "/opt/netdata/usr/libexec/"
+                                             "netdata/netdata-uninstaller.sh --yes --force",
+                                             log=False)
                     Log.wait(self, "Upgrading Netdata")
                     # detect static binaries install
-                    if os.path.isdir('/opt/netdata'):
-                        if os.path.exists(
-                            '/opt/netdata/usr/libexec/'
-                                'netdata/netdata-updater.sh'):
-                            WOShellExec.cmd_exec(
-                                self, "bash /opt/netdata/usr/"
-                                "libexec/netdata/netdata-"
-                                "updater.sh")
-                        else:
-                            WOShellExec.cmd_exec(
-                                self, "bash /var/lib/wo/tmp/kickstart.sh")
-                    # detect install from source
-                    elif os.path.isdir('/etc/netdata'):
-                        if os.path.exists(
-                                '/usr/libexec/netdata/netdata-updater.sh'):
-                            WOShellExec.cmd_exec(
-                                self,
-                                'bash /usr/libexec/netdata/netdata-updater.sh')
-                        else:
-                            WOShellExec.cmd_exec(
-                                self, "bash /var/lib/wo/tmp/kickstart.sh")
+                    WOShellExec.cmd_exec(
+                        self,
+                        "bash /var/lib/wo/tmp/kickstart.sh "
+                        "--dont-wait --no-updates --stable-channel "
+                        "--reinstall-even-if-unsafe",
+                        errormsg='', log=False)
                     Log.valide(self, "Upgrading Netdata")
 
                 if WOAptGet.is_selected(self, 'WordOps Dashboard', packages):
@@ -417,13 +401,13 @@ class WOStackUpgradeController(CementBaseController):
                                      .format(WOVar.wo_webroot)),
                                     ('/var/lib/wo/tmp/phpMyAdmin-{0}'
                                      '-all-languages/config.inc.php'
-                                     .format(WOVar.wo_phpmyadmin))
+                                     .format(wo_phpmyadmin))
                                     )
                     WOFileUtils.rm(self, '{0}22222/htdocs/db/pma'
                                    .format(WOVar.wo_webroot))
                     shutil.move('/var/lib/wo/tmp/phpMyAdmin-{0}'
                                 '-all-languages/'
-                                .format(WOVar.wo_phpmyadmin),
+                                .format(wo_phpmyadmin),
                                 '{0}22222/htdocs/db/pma/'
                                 .format(WOVar.wo_webroot))
                     WOFileUtils.chown(self, "{0}22222/htdocs"

@@ -7,6 +7,7 @@ from wo.core.logging import Log
 from wo.core.shellexec import WOShellExec
 from wo.core.variables import WOVar
 from wo.core.acme import WOAcme
+from wo.core.template import WOTemplate
 
 
 class SSL:
@@ -101,7 +102,7 @@ class SSL:
                     WOShellExec.cmd_exec(
                         self, "{0} search-replace \'http://{1}\'"
                         "\'https://{1}\' --skip-columns=guid "
-                        "--skip-tables=wp_users"
+                        "--skip-tables=wp_users --allow-root"
                         .format(WOVar.wo_wpcli_path, domain))
                 except Exception as e:
                     Log.debug(self, str(e))
@@ -135,9 +136,9 @@ class SSL:
 
     def setuphsts(self, wo_domain_name, enable=True):
         """Enable or disable htsts for a site"""
-        if enable:
+        if enable is True:
             if WOFileUtils.enabledisable(
-                self, '/var/www/{0}/conf/nginx/hsts.conf'
+                self, f'/var/www/{wo_domain_name}/conf/nginx/hsts.conf'
             ):
                 return 0
             else:
@@ -145,8 +146,7 @@ class SSL:
                     self, "Adding /var/www/{0}/conf/nginx/hsts.conf"
                     .format(wo_domain_name))
 
-                hstsconf = open("/var/www/{0}/conf/nginx/hsts.conf"
-                                .format(wo_domain_name),
+                hstsconf = open(f"/var/www/{wo_domain_name}/conf/nginx/hsts.conf",
                                 encoding='utf-8', mode='w')
                 hstsconf.write("more_set_headers "
                                "\"Strict-Transport-Security: "
@@ -157,7 +157,7 @@ class SSL:
                 return 0
         else:
             if WOFileUtils.enabledisable(
-                self, '/var/www/{0}/conf/nginx/hsts.conf',
+                self, f'/var/www/{wo_domain_name}/conf/nginx/hsts.conf',
                 enable=False
             ):
                 Log.info(self, "HSTS disabled")
@@ -176,13 +176,11 @@ class SSL:
         try:
             WOShellExec.cmd_exec(
                 self, "openssl genrsa -out "
-                "{0}/ssl.key 2048"
-                .format(selfs_tmp))
+                f"{selfs_tmp}/ssl.key 2048")
             WOShellExec.cmd_exec(
                 self, "openssl req -new -batch  "
                 "-subj /commonName=localhost/ "
-                "-key {0}/ssl.key -out {0}/ssl.csr"
-                .format(selfs_tmp))
+                f"-key {selfs_tmp}/ssl.key -out {selfs_tmp}/ssl.csr")
 
             WOFileUtils.mvfile(
                 self, "{0}/ssl.key"
@@ -231,6 +229,7 @@ class SSL:
     def httpsredirect(self, wo_domain_name, acme_domains, redirect=True):
         """Create Nginx redirection from http to https"""
         wo_acme_domains = ' '.join(acme_domains)
+        data = dict(domains=wo_acme_domains)
         if redirect:
             Log.wait(self, "Adding HTTPS redirection")
             if WOFileUtils.enabledisable(
@@ -240,19 +239,10 @@ class SSL:
                 return 0
             else:
                 try:
-                    sslconf = open(
-                        "/etc/nginx/conf.d/force-ssl-{0}.conf"
-                        .format(wo_domain_name),
-                        encoding='utf-8', mode='w')
-                    sslconf.write(
-                        "server {\n"
-                        "\tlisten 80;\n" +
-                        "\tlisten [::]:80;\n" +
-                        "\tserver_name {0};\n"
-                        .format(wo_acme_domains) +
-                        "\treturn 301 https://$host"
-                        "$request_uri;\n}")
-                    sslconf.close()
+                    WOTemplate.deploy(self,
+                                      f'/etc/nginx/conf.d/force-ssl-{wo_domain_name}.conf',
+                                      'force-ssl.mustache',
+                                      data)
                 except IOError as e:
                     Log.debug(self, str(e))
                     Log.debug(
